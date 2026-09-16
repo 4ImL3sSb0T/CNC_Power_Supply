@@ -21,6 +21,9 @@ void imu_test_task(void *pvParameters) {
 
     vec3f accel, gyro, mag;
 
+    // 版本号探测必须在任务上下文里做（DMA 传输会阻塞等待中断通知）
+    imu_probe_version();
+
     while (1) {
         if (imu_get_accel(&accel) == EXIT_OK) {
             printf("Accel: X=%.2f, Y=%.2f, Z=%.2f\n", accel.x, accel.y, accel.z);
