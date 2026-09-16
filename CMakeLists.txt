@@ -64,6 +64,31 @@ add_subdirectory(
         FREERTOS_KERNEL)
 
 # ====================================================================================
+# CMSIS-DSP：FIR/IIR/FFT/矩阵/统计等信号处理内核
+#
+# 用官方自带的 CMake（Source/CMakeLists.txt 会建出 CMSISDSP target），三个输入：
+#   CMSISCORE       它按 ${CMSISCORE}/Include 去找 CMSIS Core 头（cmsis_compiler.h 等），
+#                   直接复用 Pico SDK 自带的 stub（CMSIS Core 6.1），不再单独拉 CMSIS_5
+#   FASTBUILD=ON    改用各功能目录下的聚合源文件（BasicMathFunctions.c 这种，内部
+#                   #include 了目录里全部 arm_*_f32.c/_q15.c…），只编译 27 个翻译
+#                   单元，而不是 660 个源文件
+#   DISABLEFLOAT16  f16 内核在 M33 上本来就不会启用（__ARM_FP16_FORMAT_IEEE 未定义，
+#                   见 Include/arm_math_types_f16.h:52-62），关掉纯粹为了少编译
+# ====================================================================================
+set(CMSISCORE "${PICO_SDK_PATH}/src/rp2_common/cmsis/stub/CMSIS/Core")
+if (NOT EXISTS "${CMSISCORE}/Include/cmsis_compiler.h")
+    message(FATAL_ERROR "CMSIS Core 头不在 ${CMSISCORE}，SDK 目录结构可能变了")
+endif()
+set(FASTBUILD ON CACHE BOOL "CMSIS-DSP: 用聚合源文件编译，缩短编译时间")
+set(DISABLEFLOAT16 ON CACHE BOOL "CMSIS-DSP: 不编译 f16 内核")
+add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/src/third_party/CMSIS-DSP/Source CMSIS-DSP)
+# --gc-sections 要靠 -ffunction-sections 才能丢掉未调用的函数。pico 把这两个选项挂在
+# pico_standard_link 上按 INTERFACE 传播，只会到达链接了它的 target；CMSISDSP 是独立
+# 静态库、够不着，必须自己补一份 —— 否则 FASTBUILD 聚合出来的巨型 .o 会整块进固件
+# （实测 TransformFunctions.c：带选项 170 个 .text.* 段，不带 0 个）。
+target_compile_options(CMSISDSP PRIVATE -ffunction-sections -fdata-sections)
+
+# ====================================================================================
 # 应用源码：自动扫描 src/ 下的 .c / .cpp，新增源文件后不需要再改这个文件
 #
 # CONFIGURE_DEPENDS：构建时重新比对 glob 结果，目录里增删源文件会自动触发 cmake
