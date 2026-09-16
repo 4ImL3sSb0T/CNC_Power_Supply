@@ -4,6 +4,3 @@
 [submodule "src/third_party/FreeRTOS-Kernel-Community-Supported-Ports"]
 	path = src/third_party/FreeRTOS-Kernel-Community-Supported-Ports
 	url = https://github.com/FreeRTOS/FreeRTOS-Kernel-Community-Supported-Ports.git
-[submodule "src/third_party/CMSIS-DSP"]
-	path = src/third_party/CMSIS-DSP
-	url = https://github.com/ARM-software/CMSIS-DSP.git
