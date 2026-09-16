@@ -63,11 +63,27 @@ add_subdirectory(
         ${CMAKE_CURRENT_LIST_DIR}/src/third_party/FreeRTOS-Kernel-Community-Supported-Ports/GCC/RP2350_ARM_NTZ
         FREERTOS_KERNEL)
 
+# ====================================================================================
+# 应用源码：自动扫描 src/ 下的 .c / .cpp，新增源文件后不需要再改这个文件
+#
+# CONFIGURE_DEPENDS：构建时重新比对 glob 结果，目录里增删源文件会自动触发 cmake
+# 重新配置（Ninja / Makefile 生成器支持良好，本工程用的就是 Ninja）。
+#
+# 必须排除 src/third_party：那里是 FreeRTOS 内核与社区移植子模块，包含数千个 .c
+# 文件，由它们各自的 CMakeLists.txt 负责编译，不能被这里的 glob 吞掉。
+#
+# src/pio/*.pio 不由这里处理，见下面的 pico_generate_pio_header。
+# ====================================================================================
+file(GLOB_RECURSE APP_SOURCES CONFIGURE_DEPENDS
+        ${CMAKE_CURRENT_LIST_DIR}/src/*.c
+        ${CMAKE_CURRENT_LIST_DIR}/src/*.cpp)
+list(FILTER APP_SOURCES EXCLUDE REGEX "/third_party/")
+
 # Add executable. Default name is the project name, version 0.1
 
 add_executable(CNC_Power_Supply
         main.c
-        src/app/freertos_hooks.c
+        ${APP_SOURCES}
         )
 
 pico_set_program_name(CNC_Power_Supply "CNC_Power_Supply")
