@@ -3,7 +3,6 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-
 int main()
 {
     stdio_init_all();
