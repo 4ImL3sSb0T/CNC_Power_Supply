@@ -1,0 +1,6 @@
+[submodule "src/third_party/FreeRTOS-Kernel"]
+	path = src/third_party/FreeRTOS-Kernel
+	url = https://github.com/raspberrypi/FreeRTOS-Kernel.git
+[submodule "src/third_party/FreeRTOS-Kernel-Community-Supported-Ports"]
+	path = src/third_party/FreeRTOS-Kernel-Community-Supported-Ports
+	url = https://github.com/FreeRTOS/FreeRTOS-Kernel-Community-Supported-Ports.git
