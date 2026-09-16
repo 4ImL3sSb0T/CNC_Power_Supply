@@ -1,6 +1,10 @@
 #ifndef _IMU_CONFIG_H_
 #define _IMU_CONFIG_H_
 
+// 读取方式：1 = DMA（driver/i2c/i2c_dma）；0 = SDK 阻塞读取（i2c_*_blocking）。
+// 两种模式都只影响读取路径本身，供 CPU 占用率对照测试切换。
+#define IMU_USE_DMA           1
+
 // IMU（I2C 从设备）地址与总线速率
 #define IMU_I2C_ADDRESS       0x23
 #define IMU_I2C_BAUDRATE_HZ   100000

@@ -95,7 +95,17 @@
 /*---------------------------------------------------------------------------*/
 /* 运行时统计与追踪                                                             */
 /*---------------------------------------------------------------------------*/
-#define configGENERATE_RUN_TIME_STATS           0
+/* CPU 占用率统计：内核为每个任务累计“实际运行时间”，阻塞等待的时间不计入，
+ * 计数源是 1 MHz 硬件定时器（见 src/app/freertos_hooks.c）。
+ * 32 位 µs 计数约 71 分钟回绕一次，内核用无符号差值累加，跨回绕的那一次
+ * 采样区间会被丢弃，对统计精度无影响。 */
+#define configGENERATE_RUN_TIME_STATS           1
+#define configRUN_TIME_COUNTER_TYPE             uint32_t
+extern uint32_t ulPortGetRunTimeCounterValue( void );
+extern void vConfigureTimerForRunTimeStats( void );
+#define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS()  vConfigureTimerForRunTimeStats()
+#define portGET_RUN_TIME_COUNTER_VALUE()          ulPortGetRunTimeCounterValue()
+
 #define configUSE_TRACE_FACILITY                0
 #define configUSE_STATS_FORMATTING_FUNCTIONS    0
 
