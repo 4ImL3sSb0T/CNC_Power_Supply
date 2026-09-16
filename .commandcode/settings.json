@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(C:Usersyuang.pico-sdkninjav1.13.2ninja.exe:*)"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}
