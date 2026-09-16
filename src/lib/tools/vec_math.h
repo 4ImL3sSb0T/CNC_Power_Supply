@@ -38,12 +38,12 @@ typedef struct vec3f
 
 typedef struct vec3i
 {
-    int32 x, y, z;
+    i32 x, y, z;
 } vec3i;
 
 typedef struct vec3u
 {
-    uint32 x, y, z;
+    u32 x, y, z;
 } vec3u;
 
 /* ========================================================================

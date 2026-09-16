@@ -1,4 +1,5 @@
 #include "common_def.h"
+#include <stdio.h>
 
 const char *error_code_name(exit_code_t code) {
     switch (code)
@@ -32,13 +33,13 @@ void assert_fun(exit_code_t code) {
     case EXIT_OK:
         break;
     case EXIT_SKIP:
-        zf_log(1, (char *)name);
+        printf("%s\n", name);
         break;
     case EXIT_IN_PROGRESS:
-        zf_log(1, (char *)name);
+        printf("%s\n", name);
         break;
     default:
-        zf_log(0, (char *)name);
+        printf("%s\n", name);
         break;
     }
 }

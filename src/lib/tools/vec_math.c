@@ -10,6 +10,7 @@
  */
 #include "vec_math.h"
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 /* ========================================================================
@@ -894,10 +895,7 @@ void vec2f_to_string(vec2f_t v, char* buffer, u32 buffer_size) {
         return;
     }
 
-    // 使用简单的格式化
-    // 注意：这里避免使用 sprintf 以减少依赖
-    // 实际使用时可以根据需要启用 sprintf
-    sprintf(buffer, "(%.2f, %.2f)", v.x, v.y);
+    snprintf(buffer, buffer_size, "(%.2f, %.2f)", v.x, v.y);
 }
 
 /**
