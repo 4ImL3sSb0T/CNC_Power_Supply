@@ -7,6 +7,8 @@
 #include "queue.h"
 #include "config/imu_config.h"
 
-
-
-int imu_init();
+exit_code_t imu_init(i2c_inst_t *i2c_instance, u32 sdl_pin, u32 scl_pin);
+exit_code_t imu_deinit();
+exit_code_t imu_get_accel(vec3f *accel);
+exit_code_t imu_get_gyro(vec3f *gyro);
+exit_code_t imu_get_mag(vec3f *mag);
