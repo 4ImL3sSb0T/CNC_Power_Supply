@@ -141,6 +141,7 @@ target_link_libraries(CNC_Power_Supply
         #   也不会和头文件里的 #define 撞成重定义。
         FreeRTOS-Kernel
         FreeRTOS-Kernel-Heap4
+        CMSISDSP
         hardware_spi
         hardware_i2c
         hardware_dma
