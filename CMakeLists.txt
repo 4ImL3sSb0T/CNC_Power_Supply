@@ -94,13 +94,12 @@ target_include_directories(CNC_Power_Supply PRIVATE
 target_link_libraries(CNC_Power_Supply
         # FreeRTOS-Kernel: 内核 + RP2350 移植（INTERFACE 库，由移植的 library.cmake 提供）
         # FreeRTOS-Kernel-Heap4: heap_4.c（带合并的首次适配分配器），换 heap_1/2/3/5 改这里即可
-        # FreeRTOS-Kernel-Static: 打开 configSUPPORT_STATIC_ALLOCATION +
-        #   configKERNEL_PROVIDED_STATIC_MEMORY，让内核自带 idle/timer 任务的静态内存。
-        #   不加这个就必须自己实现 vApplicationGetIdleTaskMemory /
-        #   vApplicationGetPassiveIdleTaskMemory / vApplicationGetTimerTaskMemory。
+        # 注：移植还提供 FreeRTOS-Kernel-Static，作用是往编译命令里塞
+        #   configSUPPORT_STATIC_ALLOCATION / configKERNEL_PROVIDED_STATIC_MEMORY 两个 -D。
+        #   我们改为在 FreeRTOSConfig.h 里统一定义这些宏，就不链它了——配置集中在一处，
+        #   也不会和头文件里的 #define 撞成重定义。
         FreeRTOS-Kernel
         FreeRTOS-Kernel-Heap4
-        FreeRTOS-Kernel-Static
         hardware_spi
         hardware_i2c
         hardware_dma

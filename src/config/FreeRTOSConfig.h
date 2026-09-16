@@ -2,10 +2,11 @@
  * FreeRTOSConfig.h — CNC_Power_Supply
  *
  * 目标平台：Raspberry Pi Pico 2 (RP2350, ARM Cortex-M33, 双核)
- * 内核：    raspberrypi/FreeRTOS-Kernel 的 RP2350_ARM_NTZ SMP 移植
+ * 内核：    FreeRTOS/FreeRTOS-Kernel V11.3.1
+ * 移植：    FreeRTOS-Kernel-Community-Supported-Ports 的 GCC/RP2350_ARM_NTZ (SMP)
  *
- * 该移植的必需项（见 portable/ThirdParty/GCC/RP2350_ARM_NTZ/README.md）
- * 已在下方“Armv8-M / 移植必需项”一节中固定，改动前请先读那份 README。
+ * 移植的必需项已在下方“Armv8-M / 移植必需项”一节中固定，改动前请先读
+ * src/third_party/FreeRTOS-Kernel-Community-Supported-Ports/GCC/RP2350_ARM_NTZ/README.md。
  */
 
 #ifndef FREERTOS_CONFIG_H
@@ -36,7 +37,9 @@
 #define configMAX_PRIORITIES                    ( 8 )
 #define configMINIMAL_STACK_SIZE                ( 256 )    /* 单位：字(word)，即 1 KiB */
 #define configMAX_TASK_NAME_LEN                 ( 16 )
-#define configUSE_16_BIT_TICKS                  0
+/* tick 计数宽度。旧的 configUSE_16_BIT_TICKS 在 V11.x 里仍被支持（FreeRTOS.h
+ * 会做映射），但已不推荐，新写法是直接指定宽度。两者只能存在一个。 */
+#define configTICK_TYPE_WIDTH_IN_BITS           TICK_TYPE_WIDTH_32_BITS
 #define configIDLE_SHOULD_YIELD                 1
 
 /*---------------------------------------------------------------------------*/
@@ -64,9 +67,16 @@
 /* 动态分配走 FreeRTOS-Kernel-Heap4（见 CMakeLists.txt 的 target_link_libraries）。
  * RP2350 共有 520 KiB SRAM，此处给内核堆 96 KiB，其余留给栈/静态数据。 */
 #define configSUPPORT_DYNAMIC_ALLOCATION        1
-#define configSUPPORT_STATIC_ALLOCATION         1
 #define configTOTAL_HEAP_SIZE                   ( 96 * 1024 )
 #define configAPPLICATION_ALLOCATED_HEAP        0
+
+/* 静态分配：可以用 xTaskCreateStatic() 等 API，任务不占上面那块 heap。
+ * configKERNEL_PROVIDED_STATIC_MEMORY 让内核自带 idle / passive-idle / timer
+ * 任务的静态内存，省掉自己实现 vApplicationGetIdleTaskMemory、
+ * vApplicationGetPassiveIdleTaskMemory（SMP 才有）、vApplicationGetTimerTaskMemory
+ * 三个函数。这两个宏由本文件统一定义，不要改用 -D 传，否则会重定义。 */
+#define configSUPPORT_STATIC_ALLOCATION         1
+#define configKERNEL_PROVIDED_STATIC_MEMORY     1
 
 /* newlib 可重入：置 1 会让每个任务持有独立的 struct _reent（errno、strtok 等
  * 才真正线程安全），代价是每个任务多占约 100 字节。若暂时不需要可置 0。 */
