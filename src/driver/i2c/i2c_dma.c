@@ -1,5 +1,5 @@
-// Vendored from https://github.com/fivdi/pico-i2c-dma
-// (MIT License, Copyright (c) 2022 Brian Cooke), master @ 2022-09-03.
+// 移植自 https://github.com/fivdi/pico-i2c-dma
+// （MIT 许可证，Copyright (c) 2022 Brian Cooke），master @ 2022-09-03。
 // 本地改动：设置 I2C 中断优先级（I2C_DMA_IRQ_PRIORITY）——原版未设置，
 // NVIC 复位默认优先级 0 会违反本工程 RP2350 FreeRTOS 移植的 FromISR 约束。
 #include "FreeRTOS.h"
@@ -11,8 +11,8 @@
 #include "i2c_dma.h"
 
 #define I2C_MAX_TRANSFER_SIZE     1056
-// A transfer timeout of 1000ms will allow a 10000 bit transfer to complete
-// successfully without timeouts at baudrates as low as 10000 baud.
+// 1000ms 的传输超时足以让一次 10000 bit 的传输在低至 10000 波特的
+// 波特率下也能顺利完成而不触发超时。
 #define I2C_TRANSFER_TIMEOUT_MS   1000
 #define I2C_TAKE_MUTEX_TIMEOUT_MS 10000
 // 本地改动：I2C 中断优先级（数值越大优先级越低）。ISR 中调用了
@@ -44,25 +44,23 @@ static i2c_dma_t i2c_dma_list[2];
 static void i2c_dma_irq_handler(i2c_dma_t *i2c_dma) {
   const uint32_t status = i2c_get_hw(i2c_dma->i2c)->intr_stat;
 
-  // If there is an abort, normally there is an abort interrupt followed by a
-  // stop interrupt. On the rare occasion, for example, if the first I2C
-  // transaction after reset is aborted, the abort and stop interrupt flags
-  // appear to be set at the same instant or almost the same instant.
+  // 如果发生中止（abort），通常先产生一次中止中断，随后再产生一次停止中断。
+  // 但在极少数情况下，例如复位后的第一次 I2C 传输就被中止时，中止标志与
+  // 停止标志看起来会在同一时刻或几乎同一时刻被置位。
   if (status & I2C_IC_INTR_STAT_R_TX_ABRT_BITS) {
-    // Transfer aborted.
+    // 传输已被中止。
     i2c_get_hw(i2c_dma->i2c)->clr_tx_abrt;
     i2c_dma->abort_detected = true;
   }
 
   if (status & I2C_IC_INTR_STAT_R_STOP_DET_BITS) {
-    // Transfer complete.
+    // 传输完成。
     i2c_get_hw(i2c_dma->i2c)->clr_stop_det;
     i2c_dma->stop_detected = true;
 
-    // If xSemaphoreGiveFromISR fails and returns errQUEUE_FULL the error
-    // isn't handled here. There isn't much that can be done. If
-    // xSemaphoreGiveFromISR fails, the corresponding call to xSemaphoreTake
-    // will eventually timeout.
+    // 如果 xSemaphoreGiveFromISR 失败并返回 errQUEUE_FULL，这里不处理该错误，
+    // 因为也做不了什么。一旦 xSemaphoreGiveFromISR 失败，对应的
+    // xSemaphoreTake 调用最终会因超时而返回。
     BaseType_t task_switch_required = pdFALSE;
     xSemaphoreGiveFromISR(i2c_dma->semaphore, &task_switch_required);
     portYIELD_FROM_ISR(task_switch_required);
@@ -130,7 +128,7 @@ static void i2c_dma_unblock(i2c_dma_t *i2c_dma) {
   bool sda_high;
   int max_tries = 9;
 
-  // Make sure the frequency of the bit-bannged I2C clock is at most 100KHz.
+  // 确保软件模拟（bit-banging）的 I2C 时钟频率不超过 100KHz。
   const uint32_t f_clk_sys_khz =
     frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);
   const uint32_t i2c_delay = f_clk_sys_khz / 100 / 2;
@@ -173,12 +171,10 @@ static int i2c_dma_init_intern(i2c_dma_t *i2c_dma) {
     }
   }
 
-  // Don't do anything with i2c_dma->mutex here, let i2c_dma_write_read take
-  // care of it. Also, directly after creation with xSemaphoreCreateMutex a
-  // mutex can be successfully taken.
+  // 这里不要对 i2c_dma->mutex 做任何操作，交给 i2c_dma_write_read 处理。
+  // 另外，用 xSemaphoreCreateMutex 创建的互斥量在创建后立刻就可以成功获取。
 
-  // Attempt to unblock a blocked bus. If it can't be unblocked, continue
-  // anyway.
+  // 尝试解除总线阻塞。如果无法解除，也继续往下执行。
   if (i2c_dma_is_blocked(i2c_dma)) {
     i2c_dma_unblock(i2c_dma);
   }
@@ -266,35 +262,35 @@ static int i2c_dma_write_read_internal(
   const bool writing = (wbuf_len > 0);
   const bool reading = (rbuf_len > 0);
 
-  int tx_chan = 0; // Channel for writing data_cmds to I2C peripheral.
-  int rx_chan = 0; // Channel for reading data from I2C peripheral, if needed.
+  int tx_chan = 0; // 用于把 data_cmds 写入 I2C 外设的通道。
+  int rx_chan = 0; // 需要时用于从 I2C 外设读取数据的通道。
 
   if (writing) {
-    // Setup commands for each byte to write to the I2C bus.
+    // 为要写入 I2C 总线的每个字节设置命令。
     for (size_t i = 0; i != wbuf_len; ++i) {
       i2c_dma->data_cmds[i] = wbuf[i];
     }
 
-    // The first byte written must be preceded by a start.
+    // 写入的第一个字节之前必须有一个起始条件。
     i2c_dma->data_cmds[0] |= I2C_IC_DATA_CMD_RESTART_BITS;
   }
 
-  // DMA tx_chan is needed for both writing and reading.
+  // 无论写还是读，都需要 DMA 的 tx_chan 通道。
   tx_chan = dma_claim_unused_channel(false);
   if (tx_chan == -1) {
     return PICO_ERROR_GENERIC;
   }
 
   if (reading) {
-    // Setup commands for each byte to read from the I2C bus.
+    // 为要从 I2C 总线读取的每个字节设置命令。
     for (size_t i = 0; i != rbuf_len; ++i) {
       i2c_dma->data_cmds[wbuf_len + i] = I2C_IC_DATA_CMD_CMD_BITS;
     }
 
-    // The first byte read must be preceded by a start/restart.
+    // 读取的第一个字节之前必须有一个起始/重复起始条件。
     i2c_dma->data_cmds[wbuf_len] |= I2C_IC_DATA_CMD_RESTART_BITS;
 
-    // DMA rx_chan is only needed for reading.
+    // 只有读操作才需要 DMA 的 rx_chan 通道。
     rx_chan = dma_claim_unused_channel(false);
     if (rx_chan == -1) {
       dma_channel_unclaim(tx_chan);
@@ -302,16 +298,16 @@ static int i2c_dma_write_read_internal(
     }
   }
 
-  // The last byte transfered must be followed by a stop.
+  // 最后传输的那个字节之后必须跟一个停止条件。
   i2c_dma->data_cmds[wbuf_len + rbuf_len - 1] |= I2C_IC_DATA_CMD_STOP_BITS;
 
-  // Tell the I2C peripheral the adderss of the device for the transfer.
+  // 告诉 I2C 外设本次传输的目标设备地址。
   i2c_dma_set_target_addr(i2c_dma->i2c, addr);
 
   i2c_dma->stop_detected = false;
   i2c_dma->abort_detected = false;
 
-  // Start the I2C transfer on required DMA channels.
+  // 在所需的 DMA 通道上启动 I2C 传输。
   if (reading) {
     i2c_dma_rx_channel_configure(i2c_dma->i2c, rx_chan, rbuf, rbuf_len);
   }
@@ -319,17 +315,15 @@ static int i2c_dma_write_read_internal(
     i2c_dma->i2c, tx_chan, i2c_dma->data_cmds, wbuf_len + rbuf_len
   );
 
-  // The I2C transfer via DMA has been started. Wait for it to complete. Under
-  // normal circumstances, the transfer is complete when a stop is detected on
-  // the bus. If the hardware detects problems during the transfer, there will
-  // normally be an abort followed by a stop. Scenarios where a stop and/or
-  // abort are not detected are also possible, for these scenarios a timeout
-  // is needed. As an example, no stop will be detected if SDA gets stuck low.
+  // 通过 DMA 的 I2C 传输已经启动，现在等待它完成。正常情况下，当总线上检测到
+  // 停止条件时传输即告完成。如果硬件在传输过程中检测到问题，通常会出现一次中止
+  // 随后再跟一次停止。也存在检测不到停止和/或中止的情况，这时就需要超时机制来
+  // 兜底。例如，当 SDA 被持续拉低时，就检测不到停止条件。
   const bool timeout = xSemaphoreTake(
     i2c_dma->semaphore, I2C_TRANSFER_TIMEOUT_MS * portTICK_PERIOD_MS
   ) == pdFALSE;
 
-  // If there were problems, abort the DMA.
+  // 如果出现问题，则中止 DMA。
   if (timeout || i2c_dma->abort_detected || !i2c_dma->stop_detected) {
     dma_channel_abort(tx_chan);
     if (reading) {
@@ -337,7 +331,7 @@ static int i2c_dma_write_read_internal(
     }
   }
 
-  // Free the DMA channels.
+  // 释放 DMA 通道。
   dma_channel_unclaim(tx_chan);
   if (reading) {
     dma_channel_unclaim(rx_chan);
@@ -351,7 +345,7 @@ static int i2c_dma_write_read_internal(
     rc = PICO_ERROR_IO;
   }
 
-  // Attempt to recover from errors.
+  // 尝试从错误中恢复。
   if (rc != PICO_OK) {
     i2c_dma_reinit(i2c_dma);
   }
@@ -383,4 +377,3 @@ int i2c_dma_write_read(
 
   return rc;
 }
-

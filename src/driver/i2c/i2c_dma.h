@@ -3,316 +3,307 @@
 
 #include "hardware/i2c.h"
 
-// Explanation of symbols used in function documentation below.
+// 下面函数文档中所用符号的说明。
 // --------------+------------------------------------------------------------
-// S             | Start condition.
-// Sr            | Repeated start condition, used to switch from write to read
-//               | mode.
-// P             | Stop condition.
-// Rd/Wr (1 bit) | Read/Write bit. Rd equals 1, Wr equals 0.
-// A, NA (1 bit) | Acknowledge (ACK) and Not Acknowledge (NACK) bit
-// addr (7 bits) | 7 bit I2C address.
-// reg (8 bits)  | Register byte, a data byte which typically selects a
-//               | register on the device.
-// [..]          | Data sent by I2C device, as opposed to data sent by the
-//               | host adapter.
+// S             | 起始条件。
+// Sr            | 重复起始条件，用于从写模式切换到读模式。
+// P             | 停止条件。
+// Rd/Wr (1 bit) | 读/写位。Rd 为 1，Wr 为 0。
+// A, NA (1 bit) | 应答（ACK）与非应答（NACK）位。
+// addr (7 bits) | 7 位 I2C 地址。
+// reg (8 bits)  | 寄存器字节，即通常用于选中器件上某个寄存器的数据字节。
+// [..]          | 由 I2C 从器件发送的数据（相对于主机适配器发送的数据）。
 // --------------+------------------------------------------------------------
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// An i2c_dma_t stores all the data required by the i2c_dma_* functions
-// for driving I2C devices connected to I2C peripherals I2C0 and I2C1. Call
-// i2c_dma_init to get a pointer to an i2c_dma_t for I2C0 or I2C1.
+// i2c_dma_t 保存了 i2c_dma_* 系列函数驱动挂在 I2C 外设 I2C0 和 I2C1 上的
+// I2C 器件所需的全部数据。调用 i2c_dma_init 可获取 I2C0 或 I2C1 对应的
+// i2c_dma_t 指针。
 typedef struct i2c_dma_s i2c_dma_t;
 
-// Initializes an I2C peripheral, its SDA pin, its SCL pin, its baudrate,
-// enables the peripheral, and prepares it for DMA usage. i2c_dma_init must be
-// called before other functions. Copies a pointer to an i2c_dma_t to
-// *pi2c_dma. This i2c_dma_t pointer is the pointer passed as the first
-// parameter to all other i2c_dma_* functions.
+// 初始化 I2C 外设及其 SDA 引脚、SCL 引脚和波特率，使能外设，并为其使用
+// DMA 做好准备。必须先调用 i2c_dma_init，再调用其他函数。该函数把指向
+// i2c_dma_t 的指针拷贝到 *pi2c_dma。这个 i2c_dma_t 指针就是传给所有其他
+// i2c_dma_* 函数第一个参数的指针。
 //
-// Returns
+// 返回值
 //   PICO_OK
-//     Function completed successfully
+//     函数执行成功
 //   PICO_ERROR_GENERIC
-//     Error creating semaphore
-//     Error creating mutex
-//     Error attempting to take a semaphore
+//     创建信号量失败
+//     创建互斥量失败
+//     获取信号量失败
 int i2c_dma_init(
-  i2c_dma_t **pi2c_dma, // A pointer to an i2c_dma_t pointer
-  i2c_inst_t *i2c,      // Either i2c0 or i2c1
-  uint baudrate,        // Baudrate in hertz
-  uint sda_gpio,        // GPIO number for SDA
-  uint scl_gpio         // GPIO number for SCL
+  i2c_dma_t **pi2c_dma, // 指向 i2c_dma_t 指针的指针
+  i2c_inst_t *i2c,      // i2c0 或 i2c1
+  uint baudrate,        // 波特率，单位赫兹
+  uint sda_gpio,        // SDA 的 GPIO 编号
+  uint scl_gpio         // SCL 的 GPIO 编号
 );
 
-// Writes a block of bytes and/or reads a block of bytes in a single I2C
-// transaction.
+// 在单次 I2C 传输中写入一段字节和/或读取一段字节。
 //
-// I2C Transactions:
+// I2C 传输时序：
 //
-// Write a block of bytes:
+// 写入一段字节：
 // S addr Wr [A] wbuf(0) [A] wbuf(1) [A] ... [A] wbuf(wbuf_len-1) [A] P
 //
-// Read a block of bytes:
+// 读取一段字节：
 // S addr Rd [A] [rbuf(0)] A [rbuf(1)] A ... A [rbuf(rbuf_len-1)] NA P
 //
-// Write a block of bytes and read a block of bytes:
+// 写入一段字节再读取一段字节：
 // S addr Wr [A] wbuf(0) [A] wbuf(1) [A] ... [A] wbuf(wbuf_len-1) [A]
 //   Sr addr Rd [A] [rbuf(0)] A [rbuf(1)] A ... A [rbuf(rbuf_len-1)] NA P
 //
-// Returns
+// 返回值
 //   PICO_OK
-//     Function completed successfully
+//     函数执行成功
 //   PICO_ERROR_INVALID_ARG
-//     Invalid argument passed to function
+//     传给函数的参数无效
 //   PICO_ERROR_TIMEOUT
-//     Timeout waiting to take a mutex
-//     Timeout waiting for I2C transaction to complete
+//     等待获取互斥量超时
+//     等待 I2C 传输完成超时
 //   PICO_ERROR_IO
-//     I2C transaction aborted by I2C peripheral
-//     No stop condition for transaction detected by I2C peripheral
+//     I2C 传输被 I2C 外设中止
+//     I2C 外设未检测到传输的停止条件
 //   PICO_ERROR_GENERIC
-//     Error attempting to give a mutex
-//     Error attemptimg to claim a DMA channel
+//     释放互斥量失败
+//     申请 DMA 通道失败
 int i2c_dma_write_read(
-  i2c_dma_t *i2c_dma,  // i2c_dma_t pointer for I2C0 or I2C1
-  uint8_t addr,        // 7 bit I2C address
-  const uint8_t *wbuf, // Pointer to block of bytes to write or NULL
-  size_t wbuf_len,     // Length of block of bytes to write or 0
-  uint8_t *rbuf,       // Pointer to block of bytes for data read or NULL
-  size_t rbuf_len      // Number of bytes of data to read or 0
+  i2c_dma_t *i2c_dma,  // I2C0 或 I2C1 对应的 i2c_dma_t 指针
+  uint8_t addr,        // 7 位 I2C 地址
+  const uint8_t *wbuf, // 指向要写入的字节块的指针，或 NULL
+  size_t wbuf_len,     // 要写入的字节块长度，或 0
+  uint8_t *rbuf,       // 指向存放读取数据的字节块的指针，或 NULL
+  size_t rbuf_len      // 要读取的数据字节数，或 0
 );
 
-// Writes a block of bytes.
+// 写入一段字节。
 //
-// I2C Transaction:
+// I2C 传输时序：
 // S addr Wr [A] wbuf(0) [A] wbuf(1) [A] ... [A] wbuf(wbuf_len-1) [A] P
 //
-// Returns
+// 返回值
 //   PICO_OK
-//     Function completed successfully
+//     函数执行成功
 //   PICO_ERROR_INVALID_ARG
-//     Invalid argument passed to function
+//     传给函数的参数无效
 //   PICO_ERROR_TIMEOUT
-//     Timeout waiting to take a mutex
-//     Timeout waiting for I2C transaction to complete
+//     等待获取互斥量超时
+//     等待 I2C 传输完成超时
 //   PICO_ERROR_IO
-//     I2C transaction aborted by I2C peripheral
-//     No stop condition for transaction detected by I2C peripheral
+//     I2C 传输被 I2C 外设中止
+//     I2C 外设未检测到传输的停止条件
 //   PICO_ERROR_GENERIC
-//     Error attempting to give a mutex
-//     Error attemptimg to claim a DMA channel
+//     释放互斥量失败
+//     申请 DMA 通道失败
 static inline int i2c_dma_write(
-  i2c_dma_t *i2c_dma,  // i2c_dma_t pointer for I2C0 or I2C1
-  uint8_t addr,        // 7 bit I2C address
-  const uint8_t *wbuf, // Pointer to block of bytes to write or NULL
-  size_t wbuf_len      // Length of block of bytes to write or 0
+  i2c_dma_t *i2c_dma,  // I2C0 或 I2C1 对应的 i2c_dma_t 指针
+  uint8_t addr,        // 7 位 I2C 地址
+  const uint8_t *wbuf, // 指向要写入的字节块的指针，或 NULL
+  size_t wbuf_len      // 要写入的字节块长度，或 0
 ) {
   return i2c_dma_write_read(i2c_dma, addr, wbuf, wbuf_len, NULL, 0);
 }
 
-// Reads a block of bytes.
+// 读取一段字节。
 //
-// I2C Transaction:
+// I2C 传输时序：
 // S addr Rd [A] [rbuf(0)] A [rbuf(1)] A ... A [rbuf(rbuf_len-1)] NA P
 //
-// Returns
+// 返回值
 //   PICO_OK
-//     Function completed successfully
+//     函数执行成功
 //   PICO_ERROR_INVALID_ARG
-//     Invalid argument passed to function
+//     传给函数的参数无效
 //   PICO_ERROR_TIMEOUT
-//     Timeout waiting to take a mutex
-//     Timeout waiting for I2C transaction to complete
+//     等待获取互斥量超时
+//     等待 I2C 传输完成超时
 //   PICO_ERROR_IO
-//     I2C transaction aborted by I2C peripheral
-//     No stop condition for transaction detected by I2C peripheral
+//     I2C 传输被 I2C 外设中止
+//     I2C 外设未检测到传输的停止条件
 //   PICO_ERROR_GENERIC
-//     Error attempting to give a mutex
-//     Error attemptimg to claim a DMA channel
+//     释放互斥量失败
+//     申请 DMA 通道失败
 static inline int i2c_dma_read(
-  i2c_dma_t *i2c_dma, // i2c_dma_t pointer for I2C0 or I2C1
-  uint8_t addr,       // 7 bit I2C address
-  uint8_t *rbuf,      // Pointer to block of bytes for data read or NULL
-  size_t rbuf_len     // Number of bytes of data to read or 0
+  i2c_dma_t *i2c_dma, // I2C0 或 I2C1 对应的 i2c_dma_t 指针
+  uint8_t addr,       // 7 位 I2C 地址
+  uint8_t *rbuf,      // 指向存放读取数据的字节块的指针，或 NULL
+  size_t rbuf_len     // 要读取的数据字节数，或 0
 ) {
   return i2c_dma_write_read(i2c_dma, addr, NULL, 0, rbuf, rbuf_len);
 }
 
-// Writes a byte to a register.
+// 向某个寄存器写入一个字节。
 // 
-// I2C Transaction:
+// I2C 传输时序：
 // S addr Wr [A] reg [A] byte [A] P
 //
-// Returns
+// 返回值
 //   PICO_OK
-//     Function completed successfully
+//     函数执行成功
 //   PICO_ERROR_INVALID_ARG
-//     Invalid argument passed to function
+//     传给函数的参数无效
 //   PICO_ERROR_TIMEOUT
-//     Timeout waiting to take a mutex
-//     Timeout waiting for I2C transaction to complete
+//     等待获取互斥量超时
+//     等待 I2C 传输完成超时
 //   PICO_ERROR_IO
-//     I2C transaction aborted by I2C peripheral
-//     No stop condition for transaction detected by I2C peripheral
+//     I2C 传输被 I2C 外设中止
+//     I2C 外设未检测到传输的停止条件
 //   PICO_ERROR_GENERIC
-//     Error attempting to give a mutex
-//     Error attemptimg to claim a DMA channel
+//     释放互斥量失败
+//     申请 DMA 通道失败
 static inline int i2c_dma_write_byte(
-  i2c_dma_t *i2c_dma, // i2c_dma_t pointer for I2C0 or I2C1
-  uint8_t addr,       // 7 bit I2C address
-  uint8_t reg,        // Number of the register to write to
-  uint8_t byte        // Byte to write
+  i2c_dma_t *i2c_dma, // I2C0 或 I2C1 对应的 i2c_dma_t 指针
+  uint8_t addr,       // 7 位 I2C 地址
+  uint8_t reg,        // 要写入的寄存器编号
+  uint8_t byte        // 要写入的字节
 ) {
   const uint8_t wbuf[2] = {reg, byte};
   return i2c_dma_write_read(i2c_dma, addr, wbuf, 2, NULL, 0);
 }
 
-// Reads a byte from a register.
+// 从某个寄存器读取一个字节。
 // 
-// I2C Transaction:
+// I2C 传输时序：
 // S addr Wr [A] reg [A] Sr addr Rd [A] [byte] NA P
 //
-// Returns
+// 返回值
 //   PICO_OK
-//     Function completed successfully
+//     函数执行成功
 //   PICO_ERROR_INVALID_ARG
-//     Invalid argument passed to function
+//     传给函数的参数无效
 //   PICO_ERROR_TIMEOUT
-//     Timeout waiting to take a mutex
-//     Timeout waiting for I2C transaction to complete
+//     等待获取互斥量超时
+//     等待 I2C 传输完成超时
 //   PICO_ERROR_IO
-//     I2C transaction aborted by I2C peripheral
-//     No stop condition for transaction detected by I2C peripheral
+//     I2C 传输被 I2C 外设中止
+//     I2C 外设未检测到传输的停止条件
 //   PICO_ERROR_GENERIC
-//     Error attempting to give a mutex
-//     Error attemptimg to claim a DMA channel
+//     释放互斥量失败
+//     申请 DMA 通道失败
 static inline int i2c_dma_read_byte(
-  i2c_dma_t *i2c_dma, // i2c_dma_t pointer for I2C0 or I2C1
-  uint8_t addr,       // 7 bit I2C address
-  uint8_t reg,        // Number of the register to read from
-  uint8_t *byte       // Pointer to the byte for the data read
+  i2c_dma_t *i2c_dma, // I2C0 或 I2C1 对应的 i2c_dma_t 指针
+  uint8_t addr,       // 7 位 I2C 地址
+  uint8_t reg,        // 要读取的寄存器编号
+  uint8_t *byte       // 指向存放读取数据的字节的指针
 ) {
   return i2c_dma_write_read(i2c_dma, addr, &reg, 1, byte, 1);
 }
 
-// Writes a 16-bit word to a register. The least significant byte is sent
-// over the wire first.
+// 向某个寄存器写入一个 16 位字。先发送最低有效字节。
 //
-// I2C Transaction:
+// I2C 传输时序：
 // S addr Wr [A] reg [A] word lsb [A] word msb [A] P
 //
-// Returns
+// 返回值
 //   PICO_OK
-//     Function completed successfully
+//     函数执行成功
 //   PICO_ERROR_INVALID_ARG
-//     Invalid argument passed to function
+//     传给函数的参数无效
 //   PICO_ERROR_TIMEOUT
-//     Timeout waiting to take a mutex
-//     Timeout waiting for I2C transaction to complete
+//     等待获取互斥量超时
+//     等待 I2C 传输完成超时
 //   PICO_ERROR_IO
-//     I2C transaction aborted by I2C peripheral
-//     No stop condition for transaction detected by I2C peripheral
+//     I2C 传输被 I2C 外设中止
+//     I2C 外设未检测到传输的停止条件
 //   PICO_ERROR_GENERIC
-//     Error attempting to give a mutex
-//     Error attemptimg to claim a DMA channel
+//     释放互斥量失败
+//     申请 DMA 通道失败
 static inline int i2c_dma_write_word(
-  i2c_dma_t *i2c_dma, // i2c_dma_t pointer for I2C0 or I2C1
-  uint8_t addr,       // 7 bit I2C address
-  uint8_t reg,        // Number of the register to write to
-  uint16_t word       // 16-bit word to write
+  i2c_dma_t *i2c_dma, // I2C0 或 I2C1 对应的 i2c_dma_t 指针
+  uint8_t addr,       // 7 位 I2C 地址
+  uint8_t reg,        // 要写入的寄存器编号
+  uint16_t word       // 要写入的 16 位字
 ) {
   const uint8_t wbuf[3] = {reg, word & 0xff, word >> 8};
   return i2c_dma_write_read(i2c_dma, addr, wbuf, 3, NULL, 0);
 }
 
-// Reads a 16-bit word from a register. The least significant byte is received
-// over the wire first.
+// 从某个寄存器读取一个 16 位字。先接收最低有效字节。
 //
-// I2C Transaction:
+// I2C 传输时序：
 // S addr Wr [A] reg [A] Sr addr Rd [A] [word lsb] A [word msb] NA P
 //
-// Returns
+// 返回值
 //   PICO_OK
-//     Function completed successfully
+//     函数执行成功
 //   PICO_ERROR_INVALID_ARG
-//     Invalid argument passed to function
+//     传给函数的参数无效
 //   PICO_ERROR_TIMEOUT
-//     Timeout waiting to take a mutex
-//     Timeout waiting for I2C transaction to complete
+//     等待获取互斥量超时
+//     等待 I2C 传输完成超时
 //   PICO_ERROR_IO
-//     I2C transaction aborted by I2C peripheral
-//     No stop condition for transaction detected by I2C peripheral
+//     I2C 传输被 I2C 外设中止
+//     I2C 外设未检测到传输的停止条件
 //   PICO_ERROR_GENERIC
-//     Error attempting to give a mutex
-//     Error attemptimg to claim a DMA channel
+//     释放互斥量失败
+//     申请 DMA 通道失败
 static inline int i2c_dma_read_word(
-  i2c_dma_t *i2c_dma, // i2c_dma_t pointer for I2C0 or I2C1
-  uint8_t addr,       // 7 bit I2C address
-  uint8_t reg,        // Number of the register to read from
-  uint16_t *word      // Pointer to the 16-bit word for the data read
+  i2c_dma_t *i2c_dma, // I2C0 或 I2C1 对应的 i2c_dma_t 指针
+  uint8_t addr,       // 7 位 I2C 地址
+  uint8_t reg,        // 要读取的寄存器编号
+  uint16_t *word      // 指向存放读取数据的 16 位字的指针
 ) {
   return i2c_dma_write_read(i2c_dma, addr, &reg, 1, (uint8_t *) word, 2);
 }
 
-// Writes a 16-bit word to a register. The most significant byte is sent
-// over the wire first.
+// 向某个寄存器写入一个 16 位字。先发送最高有效字节。
 //
-// I2C Transaction:
+// I2C 传输时序：
 // S addr Wr [A] reg [A] word msb [A] word lsb [A] P
 //
-// Returns
+// 返回值
 //   PICO_OK
-//     Function completed successfully
+//     函数执行成功
 //   PICO_ERROR_INVALID_ARG
-//     Invalid argument passed to function
+//     传给函数的参数无效
 //   PICO_ERROR_TIMEOUT
-//     Timeout waiting to take a mutex
-//     Timeout waiting for I2C transaction to complete
+//     等待获取互斥量超时
+//     等待 I2C 传输完成超时
 //   PICO_ERROR_IO
-//     I2C transaction aborted by I2C peripheral
-//     No stop condition for transaction detected by I2C peripheral
+//     I2C 传输被 I2C 外设中止
+//     I2C 外设未检测到传输的停止条件
 //   PICO_ERROR_GENERIC
-//     Error attempting to give a mutex
-//     Error attemptimg to claim a DMA channel
+//     释放互斥量失败
+//     申请 DMA 通道失败
 static inline int i2c_dma_write_word_swapped(
-  i2c_dma_t *i2c_dma, // i2c_dma_t pointer for I2C0 or I2C1
-  uint8_t addr,       // 7 bit I2C address
-  uint8_t reg,        // Number of the register to write to
-  uint16_t word       // 16-bit word to write
+  i2c_dma_t *i2c_dma, // I2C0 或 I2C1 对应的 i2c_dma_t 指针
+  uint8_t addr,       // 7 位 I2C 地址
+  uint8_t reg,        // 要写入的寄存器编号
+  uint16_t word       // 要写入的 16 位字
 ) {
   const uint8_t wbuf[3] = {reg, word >> 8, word & 0xff};
   return i2c_dma_write_read(i2c_dma, addr, wbuf, 3, NULL, 0);
 }
 
-// Reads a 16-bit word from a register. The most significant byte is received
-// over the wire first.
+// 从某个寄存器读取一个 16 位字。先接收最高有效字节。
 //
-// I2C Transaction:
+// I2C 传输时序：
 // S addr Wr [A] reg [A] Sr addr Rd [A] [word msb] A [word lsb] NA P
 //
-// Returns
+// 返回值
 //   PICO_OK
-//     Function completed successfully
+//     函数执行成功
 //   PICO_ERROR_INVALID_ARG
-//     Invalid argument passed to function
+//     传给函数的参数无效
 //   PICO_ERROR_TIMEOUT
-//     Timeout waiting to take a mutex
-//     Timeout waiting for I2C transaction to complete
+//     等待获取互斥量超时
+//     等待 I2C 传输完成超时
 //   PICO_ERROR_IO
-//     I2C transaction aborted by I2C peripheral
-//     No stop condition for transaction detected by I2C peripheral
+//     I2C 传输被 I2C 外设中止
+//     I2C 外设未检测到传输的停止条件
 //   PICO_ERROR_GENERIC
-//     Error attempting to give a mutex
-//     Error attemptimg to claim a DMA channel
+//     释放互斥量失败
+//     申请 DMA 通道失败
 static inline int i2c_dma_read_word_swapped(
-  i2c_dma_t *i2c_dma, // i2c_dma_t pointer for I2C0 or I2C1
-  uint8_t addr,       // 7 bit I2C address
-  uint8_t reg,        // Number of the register to read from
-  uint16_t *word      // Pointer to the 16-bit word for the data read
+  i2c_dma_t *i2c_dma, // I2C0 或 I2C1 对应的 i2c_dma_t 指针
+  uint8_t addr,       // 7 位 I2C 地址
+  uint8_t reg,        // 要读取的寄存器编号
+  uint16_t *word      // 指向存放读取数据的 16 位字的指针
 ) {
   int rc = i2c_dma_write_read(i2c_dma, addr, &reg, 1, (uint8_t *) word, 2);
   *word = *word << 8 | *word >> 8;
@@ -324,4 +315,3 @@ static inline int i2c_dma_read_word_swapped(
 #endif
 
 #endif
-

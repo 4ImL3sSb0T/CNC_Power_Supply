@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Shell(C:Usersyuang.pico-sdkninjav1.13.2ninja.exe:*)"
+      "Shell(C:Usersyuang.pico-sdkninjav1.13.2ninja.exe:*)",
+      "Shell(Select-String:*)"
     ],
     "deny": [],
     "defaultMode": "default"
