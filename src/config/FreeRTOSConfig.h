@@ -125,6 +125,7 @@ extern void vConfigureTimerForRunTimeStats( void );
 #define configENABLE_FPU                        1
 
 /* README 注明：当前移植只验证过这一个取值。 */
+// 0x10, 高四位有效, 小于该值的ISR无法使用RTOS的API
 #define configMAX_SYSCALL_INTERRUPT_PRIORITY    ( 16 )
 
 /*---------------------------------------------------------------------------*/
