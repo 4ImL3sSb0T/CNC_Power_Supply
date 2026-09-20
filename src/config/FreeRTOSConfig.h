@@ -19,10 +19,8 @@
 #define configUSE_PREEMPTION                    1
 #define configUSE_TIME_SLICING                  1
 
-/* 同优先级任务之间的时间片轮转；SMP 下若设为 1 则允许两个核心同时跑
- * 不同优先级就绪任务，能提高吞吐但降低确定性。本项目的控制环路更看重
- * 时序确定性，故保持为 0。 */
-#define configRUN_MULTIPLE_PRIORITIES           0
+/* 同优先级任务之间的时间片轮转；SMP 下若设为 1 则允许两个核心同时跑 */
+#define configRUN_MULTIPLE_PRIORITIES           1
 
 /* SMP：RP2350 有 2 个 Cortex-M33 核。设为 1 即退化为单核调度。 */
 #define configNUMBER_OF_CORES                   2
