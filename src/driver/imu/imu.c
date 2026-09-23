@@ -1,9 +1,9 @@
 #include "imu.h"
-#include "driver/i2c/i2c_dma_exit.h"
+#include "bsp/i2c/i2c_dma_exit.h"
 #include "stdio.h"
 
 #if IMU_USE_DMA
-#include "driver/i2c/i2c_dma.h"
+#include "bsp/i2c/i2c_dma.h"
 #include "hardware/irq.h"
 static i2c_dma_t *imu_i2c = NULL;
 #endif
