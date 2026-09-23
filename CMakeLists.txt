@@ -94,8 +94,8 @@ target_compile_options(CMSISDSP PRIVATE -ffunction-sections -fdata-sections)
 # CONFIGURE_DEPENDS：构建时重新比对 glob 结果，目录里增删源文件会自动触发 cmake
 # 重新配置（Ninja / Makefile 生成器支持良好，本工程用的就是 Ninja）。
 #
-# 必须排除 src/third_party：那里是 FreeRTOS 内核与社区移植子模块，包含数千个 .c
-# 文件，由它们各自的 CMakeLists.txt 负责编译，不能被这里的 glob 吞掉。
+# 必须排除 src/third_party：那里是 FreeRTOS 内核、社区移植与 HAGL 图形库子模块，
+# 由它们各自的 CMakeLists.txt 负责编译，不能被这里的 glob 吞掉。
 #
 # src/pio/*.pio 不由这里处理，见下面的 pico_generate_pio_header。
 # ====================================================================================
@@ -103,6 +103,8 @@ file(GLOB_RECURSE APP_SOURCES CONFIGURE_DEPENDS
         ${CMAKE_CURRENT_LIST_DIR}/src/*.c
         ${CMAKE_CURRENT_LIST_DIR}/src/*.cpp)
 list(FILTER APP_SOURCES EXCLUDE REGEX "/third_party/")
+# HAGL HAL 由 hagl_hal 目标编入，避免 GLOB 再编一次
+list(FILTER APP_SOURCES EXCLUDE REGEX "/hagl_hal/")
 
 # Add executable. Default name is the project name, version 0.1
 
@@ -110,6 +112,13 @@ add_executable(CNC_Power_Supply
         main.c
         ${APP_SOURCES}
         )
+
+# hagl_put_char 首次调用会 calloc 一块字形缓冲，走 pico 的 newlib 堆（PICO_HEAP_SIZE）。
+# 不要设 PICO_STACK_SIZE：主栈落在 4KB 的 SCRATCH_X/Y，默认值刚好放得下，
+# 改大（如 0x4000）会直接把 scratch 区域链爆。
+target_compile_definitions(CNC_Power_Supply PRIVATE
+        PICO_HEAP_SIZE=0x8000
+)
 
 pico_set_program_name(CNC_Power_Supply "CNC_Power_Supply")
 pico_set_program_version(CNC_Power_Supply "0.1")
@@ -131,6 +140,21 @@ target_include_directories(CNC_Power_Supply PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/src
 )
 
+# ====================================================================================
+# HAGL 图形库（src/third_party/hagl，MIT）+ 本板 HAL（src/service/hagl_hal）
+# HAGL 官方 CMake 会 link hagl_hal，必须先建好这个 target，顺序不能反。
+# ====================================================================================
+add_library(hagl_hal INTERFACE)
+target_sources(hagl_hal INTERFACE
+        ${CMAKE_CURRENT_LIST_DIR}/src/service/hagl_hal/hagl_hal.c
+)
+target_include_directories(hagl_hal INTERFACE
+        ${CMAKE_CURRENT_LIST_DIR}/src/service/hagl_hal
+        ${CMAKE_CURRENT_LIST_DIR}/src
+)
+target_link_libraries(hagl_hal INTERFACE pico_stdlib)
+add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/src/third_party/hagl)
+
 # Add any user requested libraries
 target_link_libraries(CNC_Power_Supply
         # FreeRTOS-Kernel: 内核 + RP2350 移植（INTERFACE 库，由移植的 library.cmake 提供）
@@ -150,7 +174,9 @@ target_link_libraries(CNC_Power_Supply
         hardware_timer
         hardware_watchdog
         hardware_clocks
+        hardware_pwm
+        hardware_adc
+        hagl
         )
 
 pico_add_extra_outputs(CNC_Power_Supply)
-
