@@ -87,6 +87,12 @@ add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/src/third_party/CMSIS-DSP/Source CMSI
 # 静态库、够不着，必须自己补一份 —— 否则 FASTBUILD 聚合出来的巨型 .o 会整块进固件
 # （实测 TransformFunctions.c：带选项 170 个 .text.* 段，不带 0 个）。
 target_compile_options(CMSISDSP PRIVATE -ffunction-sections -fdata-sections)
+# GCC 15.2.Rel1 在任何 -O1 及以上优化等级下，编译 CMSIS-DSP 的 q31 定点函数
+# （arm_abs_q31 / arm_atan2_q31 / arm_absmax_q31 等）都会 ICE（RTL pass ce1 段错误）。
+# 根因是 if-conversion 优化把分支转成 ARM 条件执行后，ce1 pass 处理特定基本块崩溃，
+# 与 -O3 还是 -O2 无关（-O0 可过，-O1 即触发）。
+# 关掉 if-conversion 即可绕过，不影响其余优化；实测三个出问题的聚合 .o 均编译通过。
+target_compile_options(CMSISDSP PRIVATE -fno-if-conversion -fno-if-conversion2)
 
 # ====================================================================================
 # 应用源码：自动扫描 src/ 下的 .c / .cpp，新增源文件后不需要再改这个文件
@@ -142,6 +148,7 @@ target_link_libraries(CNC_Power_Supply
         FreeRTOS-Kernel
         FreeRTOS-Kernel-Heap4
         CMSISDSP
+        hardware_adc
         hardware_spi
         hardware_i2c
         hardware_dma
