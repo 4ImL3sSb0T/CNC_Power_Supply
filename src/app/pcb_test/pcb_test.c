@@ -14,6 +14,8 @@
  *
  * 按键（KEY0）：单击=跑序列，双击=手动步进电压设定（会开输出），
  *              长按=急停回安全态。
+ * 上位机（app/psu_link）走同一条命令队列：远程模式下按键只保留长按急停，
+ * 其余动作由上位机命令驱动，行为与本地按键一致。
  */
 
 #include "app/pcb_test/pcb_test.h"
@@ -24,6 +26,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "semphr.h"
+#include "queue.h"
 
 #include "config/board_config.h"
 #include "bsp/power/pcb_ctrl.h"
@@ -40,9 +43,11 @@ typedef struct {
 
 static test_status_t s_status;
 static SemaphoreHandle_t s_lock;
-static volatile u8 s_cmd_run;
-static volatile u8 s_cmd_stop;
-static volatile u8 s_cmd_manual;
+static QueueHandle_t s_cmd_queue;
+/* 中止请求：post 命令时就置位（不等队列消费），所以正在执行的测试项也能被急停打断 */
+static volatile u8 s_abort;
+/* 远程模式镜像：按键回调（key_task 上下文）要读，不能去拿 s_lock 拷整个快照 */
+static volatile u8 s_remote_mode;
 
 static u16 s_pg_fault_mv;       /* 关断态 PG 节点电压 */
 static u16 s_pg_good_mv;        /* 使能态 PG 节点电压 */
@@ -126,7 +131,7 @@ static test_result_t item_pg_enable(char *d, u32 n)
     t0 = time_us_32();
     while (pcb_ctrl_pg_state() != PG_GOOD) {
         dt_ms = (time_us_32() - t0) / 1000u;
-        if (s_cmd_stop) {
+        if (s_abort) {
             snprintf(d, n, "aborted");
             return TRES_SKIP;
         }
@@ -157,7 +162,7 @@ static test_result_t item_pg_disable(char *d, u32 n)
     t0 = time_us_32();
     while (pcb_ctrl_pg_state() != PG_FAULT) {
         dt_ms = (time_us_32() - t0) / 1000u;
-        if (s_cmd_stop) {
+        if (s_abort) {
             snprintf(d, n, "aborted");
             return TRES_SKIP;
         }
@@ -210,7 +215,7 @@ static test_result_t item_pwm_sweep(char *d, u32 n)
     pcb_ctrl_ce(true);
 
     for (i = 0; i < 5; i++) {
-        if (s_cmd_stop) {
+        if (s_abort) {
             snprintf(d, n, "aborted");
             return TRES_SKIP;
         }
@@ -258,7 +263,7 @@ static test_result_t item_ipwm_sweep(char *d, u32 n)
     pcb_ctrl_ce(true);
 
     for (i = 0; i < 5; i++) {
-        if (s_cmd_stop) {
+        if (s_abort) {
             snprintf(d, n, "aborted");
             return TRES_SKIP;
         }
@@ -304,8 +309,7 @@ static void run_sequence(void)
 {
     u8 i;
 
-    s_cmd_run = 0;
-    s_cmd_manual = 0;
+    s_abort = 0;                /* 清掉上一次留下的中止请求 */
 
     status_lock();
     for (i = 0; i < TEST_ITEM_COUNT; i++) {
@@ -325,7 +329,7 @@ static void run_sequence(void)
         u32 t0;
         u32 dt_ms;
 
-        if (s_cmd_stop) {
+        if (s_abort) {
             u8 j;
             status_lock();
             for (j = i; j < TEST_ITEM_COUNT; j++) {
@@ -363,9 +367,9 @@ static void run_sequence(void)
     refresh_live();
 
     status_lock();
-    s_status.run_state = s_cmd_stop ? RUN_ABORTED : RUN_DONE;
+    s_status.run_state = s_abort ? RUN_ABORTED : RUN_DONE;
     status_unlock();
-    printf("==== PCB 测试结束 (%s) ====\n", s_cmd_stop ? "已急停" : "完成");
+    printf("==== PCB 测试结束 (%s) ====\n", s_abort ? "已急停" : "完成");
 }
 
 /* 手动步进：5 个电压设定点循环，首次进入会开输出（IPWM=100%） */
@@ -391,34 +395,102 @@ static void manual_step(void)
            (unsigned)pcb_ctrl_vout_setpoint_mv());
 }
 
+/* ---------------- 命令执行（只在 test_task 上下文） ---------------- */
+
+/* 上位机设值 / 本地双击都算"手动设定"：屏显 MANU，序列结束会清掉 */
+static void set_manual(u8 on)
+{
+    status_lock();
+    s_status.manual_mode = on;
+    status_unlock();
+}
+
+static void handle_cmd(const pcb_test_cmd_t *cmd)
+{
+    switch ((pcb_test_cmd_op_t)cmd->op) {
+    case PCB_TEST_CMD_SET_VOUT:
+        pcb_ctrl_set_pwm_duty(cmd->arg);
+        set_manual(1);
+        refresh_live();
+        printf("[SET] VSET=%umV (D=%u%%)\n",
+               (unsigned)pcb_ctrl_vout_setpoint_mv(), (unsigned)(cmd->arg / 10u));
+        break;
+
+    case PCB_TEST_CMD_SET_ILIM:
+        pcb_ctrl_set_ipwm_duty(cmd->arg);
+        set_manual(1);
+        refresh_live();
+        printf("[SET] ILIM=%umA (D=%u%%)\n",
+               (unsigned)pcb_ctrl_ilim2_setpoint_ma(), (unsigned)(cmd->arg / 10u));
+        break;
+
+    case PCB_TEST_CMD_SET_OUTPUT:
+        pcb_ctrl_ce(cmd->arg != 0u);
+        set_manual(1);
+        refresh_live();
+        printf("[SET] CE=%s\n", (cmd->arg != 0u) ? "ON" : "OFF");
+        break;
+
+    case PCB_TEST_CMD_MANUAL_STEP:
+        if (s_status.run_state != RUN_RUNNING) {
+            manual_step();
+        }
+        break;
+
+    case PCB_TEST_CMD_RUN:
+        if (s_status.run_state != RUN_RUNNING) {
+            run_sequence();
+        }
+        break;
+
+    case PCB_TEST_CMD_STOP:
+        /* 中止请求在 post 时就置位了，跑着的测试项自己会跳出来并回安全态；
+         * 没有序列在跑就把请求清掉，免得影响下一次 */
+        if (s_status.run_state != RUN_RUNNING) {
+            s_abort = 0;
+        }
+        printf("[STOP] 中止请求\n");
+        break;
+
+    case PCB_TEST_CMD_SAFE:
+        pcb_ctrl_safe_state();
+        set_manual(0);
+        status_lock();
+        s_status.remote = 0;
+        status_unlock();
+        s_remote_mode = 0;              /* 本地急停即退出远程，上位机会收到 EV_REMOTE */
+        s_abort = 0;
+        refresh_live();
+        printf("[SAFE] 安全态：CE# 关断、PWM 0%%、IPWM 0%%\n");
+        break;
+
+    case PCB_TEST_CMD_REMOTE:
+        s_remote_mode = (cmd->arg != 0u) ? 1u : 0u;
+        status_lock();
+        s_status.remote = s_remote_mode;
+        status_unlock();
+        break;
+
+    default:
+        break;
+    }
+}
+
 void pcb_test_task(void *pvParameters)
 {
+    pcb_test_cmd_t cmd;
+
     (void)pvParameters;
 
     for (;;) {
-        if (s_cmd_run) {
-            run_sequence();
-            continue;
-        }
-
-        if (s_cmd_manual) {
-            s_cmd_manual = 0;
-            if (s_status.run_state != RUN_RUNNING) {
-                manual_step();
-            }
-        }
-
-        if (s_cmd_stop) {
-            s_cmd_stop = 0;
-            pcb_ctrl_safe_state();
-            status_lock();
-            s_status.manual_mode = 0;
-            status_unlock();
-            printf("[SAFE] 安全态：CE# 关断、PWM 0%%、IPWM 0%%\n");
+        /* 20ms 超时：没有命令时保持原有的 20Hz 快照刷新节奏 */
+        if (xQueueReceive(s_cmd_queue, &cmd, pdMS_TO_TICKS(20)) == pdTRUE) {
+            do {
+                handle_cmd(&cmd);
+            } while (xQueueReceive(s_cmd_queue, &cmd, 0) == pdTRUE);
         }
 
         refresh_live();
-        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
@@ -428,13 +500,18 @@ static void on_key(Button *btn)
 {
     switch (button_get_event(btn)) {
     case BTN_SINGLE_CLICK:
-        s_cmd_run = 1;
+        /* 远程模式下本地按键不参与操作，只保留长按急停 */
+        if (!s_remote_mode) {
+            (void)pcb_test_post_cmd(PCB_TEST_CMD_RUN, 0);
+        }
         break;
     case BTN_DOUBLE_CLICK:
-        s_cmd_manual = 1;
+        if (!s_remote_mode) {
+            (void)pcb_test_post_cmd(PCB_TEST_CMD_MANUAL_STEP, 0);
+        }
         break;
     case BTN_LONG_PRESS_START:
-        s_cmd_stop = 1;
+        (void)pcb_test_post_cmd(PCB_TEST_CMD_SAFE, 0);       /* 急停任何时候都有效 */
         break;
     default:
         break;
@@ -459,6 +536,11 @@ exit_code_t pcb_test_init(void)
         return EXIT_NO_MEMORY;
     }
 
+    s_cmd_queue = xQueueCreate(PCB_TEST_CMD_QUEUE_LEN, sizeof(pcb_test_cmd_t));
+    if (s_cmd_queue == NULL) {
+        return EXIT_NO_MEMORY;
+    }
+
     memset(&s_status, 0, sizeof(s_status));
     s_status.run_state = RUN_IDLE;
     for (i = 0; i < TEST_ITEM_COUNT; i++) {
@@ -476,4 +558,28 @@ void pcb_test_get_status(test_status_t *out)
     status_lock();
     *out = s_status;
     status_unlock();
+}
+
+/* ---------------- 命令投递（任意任务上下文，非 ISR） ---------------- */
+
+exit_code_t pcb_test_post_cmd(pcb_test_cmd_op_t op, u16 arg)
+{
+    pcb_test_cmd_t cmd;
+
+    if (s_cmd_queue == NULL) {
+        return EXIT_NOT_INITIALIZED;
+    }
+
+    /* 中止类命令立刻置位：正在跑的测试项靠它跳出最长 3s 的 PG 等待，
+     * 不必等队列被消费（test_task 只有在两次命令之间才回到队列上） */
+    if (op == PCB_TEST_CMD_STOP || op == PCB_TEST_CMD_SAFE) {
+        s_abort = 1;
+    }
+
+    cmd.op = (u8)op;
+    cmd.arg = arg;
+    if (xQueueSend(s_cmd_queue, &cmd, 0) != pdTRUE) {
+        return EXIT_BUSY;
+    }
+    return EXIT_OK;
 }

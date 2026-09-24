@@ -1,0 +1,28 @@
+[project]
+name = "psu-host"
+version = "0.1.0"
+description = "数控电源v1 测试台上位机（USB CDC 二进制协议：COBS + CRC16）"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pyserial>=3.5",
+]
+
+[project.scripts]
+psu-host = "psu_host.cli:main"
+psu-host-gui = "psu_host.gui:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/psu_host"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

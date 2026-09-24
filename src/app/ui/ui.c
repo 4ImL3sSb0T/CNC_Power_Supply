@@ -146,6 +146,9 @@ static void ui_draw(hagl_backend_t *d, const test_status_t *s)
     put_str(d, "CNC PSU PCB TEST", 4, 3, WHITE);
     st_x = (i16)(236 - (i16)strlen(st) * 6);
     put_str(d, st, st_x, 3, st_color);
+    if (s->remote) {
+        put_str(d, "RMT", (i16)(st_x - 24), 3, YELLOW);
+    }
     hagl_draw_hline(d, 0, 16, 240, GRAY);
 
     snprintf(text, sizeof(text), "VSET %sV (%u%%)", vset, (unsigned)(s->pwm_permille / 10u));
@@ -168,7 +171,11 @@ static void ui_draw(hagl_backend_t *d, const test_status_t *s)
         put_str(d, result_text(it->result), RESULT_X, y, result_color(it->result));
     }
 
-    put_str(d, "click=RUN  dbl=VSET step  long=STOP", 4, 126, GRAY);
+    if (s->remote) {
+        put_str(d, "REMOTE: click/dbl disabled  long=STOP", 4, 126, YELLOW);
+    } else {
+        put_str(d, "click=RUN  dbl=VSET step  long=STOP", 4, 126, GRAY);
+    }
 }
 
 void ui_task(void *pvParameters)

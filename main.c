@@ -8,6 +8,7 @@
  *   key_task       MultiButton 5ms 打拍
  *   sysmon_task    CPU 占用率统计（串口，1s）
  *   led_task       心跳灯 500ms
+ *   psu_link_task  上位机协议（USB CDC：命令/遥测/事件/看门狗）
  *
  * 上电第一件事是 pcb_ctrl_init()：SC8701 的 /CE 悬空即上电使能、
  * IPWM 悬空芯片不能正常工作，必须最先置安全态（CE# 关断、IPWM 0%）。
@@ -27,6 +28,7 @@
 #include "driver/imu/imu.h"
 #include "driver/led/led.h"
 #include "app/pcb_test/pcb_test.h"
+#include "app/psu_link/psu_link.h"
 #include "app/ui/ui.h"
 
 // ---------------- CPU 占用率统计 ----------------
@@ -101,6 +103,7 @@ int main()
     imu_init(i2c0, IMU_SDA_GPIO, IMU_SCL_GPIO);
     pcb_test_init();
     pcb_test_bind_keys();
+    psu_link_init();
 
     printf("数控电源v1 测试台启动 | H1: 1=AGND 2=IPWM 3=PWM 4=PG 5=CE# 6=3V3\n");
     printf("按键: 单击=跑测试 双击=步进电压设定 长按=急停\n");
@@ -110,6 +113,8 @@ int main()
     xTaskCreate(key_task, "Key Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, NULL);
     xTaskCreate(sysmon_task, "SysMon Task", configMINIMAL_STACK_SIZE * 2, NULL, tskIDLE_PRIORITY + 1, NULL);
     xTaskCreate(led_task, "LED Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, NULL);
+    /* 优先级 +2：命令响应优先于 UI/测试，仍低于定时器任务 */
+    xTaskCreate(psu_link_task, "Link Task", configMINIMAL_STACK_SIZE * 3, NULL, tskIDLE_PRIORITY + 2, NULL);
 
     printf("Starting FreeRTOS scheduler...\n");
     vTaskStartScheduler();

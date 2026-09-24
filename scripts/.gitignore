@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# CSV 记录默认落在 scripts/ 下，不入库
+*.csv
+
+# uv.lock 要入库：锁定 pyserial 版本，方便复现环境
