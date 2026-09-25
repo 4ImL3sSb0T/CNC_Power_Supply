@@ -5,7 +5,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "queue.h"
-#include "config/imu_config.h"
+#include "driver/imu/imu_config.h"
 
 exit_code_t imu_init(i2c_inst_t *i2c_instance, u32 sdl_pin, u32 scl_pin);
 exit_code_t imu_deinit();

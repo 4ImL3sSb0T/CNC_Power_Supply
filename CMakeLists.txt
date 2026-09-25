@@ -57,7 +57,7 @@ pico_sdk_init()
 # 需要 _pico_sdk_inclusion_marker 已经存在才会直接展开 library.cmake）。
 # ====================================================================================
 set(FREERTOS_KERNEL_PATH ${CMAKE_CURRENT_LIST_DIR}/src/third_party/FreeRTOS-Kernel)
-set(FREERTOS_CONFIG_FILE_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/src/config)  # FreeRTOSConfig.h 所在目录
+set(FREERTOS_CONFIG_FILE_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/src/app)  # FreeRTOSConfig.h 所在目录
 
 add_subdirectory(
         ${CMAKE_CURRENT_LIST_DIR}/src/third_party/FreeRTOS-Kernel-Community-Supported-Ports/GCC/RP2350_ARM_NTZ

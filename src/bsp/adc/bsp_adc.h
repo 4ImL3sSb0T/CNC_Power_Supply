@@ -1,3 +1,4 @@
+#pragma once
 #include "hardware/adc.h"
 #include "lib/tools/common_def.h"
 #include "stdint.h"
