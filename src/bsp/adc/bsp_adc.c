@@ -10,6 +10,7 @@ static u16 bsp_adc_buf[BSP_ADC_BUF_WORDS]
 __attribute__((aligned(1u << BSP_ADC_RING_BITS)));
 
 static int adc_dam_ch;
+static dma_channel_config cfg;
 
 bsp_adc_ch_t bsp_adc_ch[] = {
     [BSP_ADC_SUPPLY_INPUT_VOLTAGE] = {.pin = 26, .factor = 1.0f},
@@ -26,7 +27,7 @@ static u32 bsp_adc_write_pos(void) {
     return off / sizeof(u16);;
 }
 
-static float bsp_adc_read_voltage(u32 ch_off, float factor) {
+static float bsp_adc_read_voltage(BSP_ADC_CH ch_off, float factor) {
     f32 sum = 0;
     const u32 n = BSP_ADC_BUF_WORDS / 2;   // 每个通道 256 个样本
     for (u32 i = 0; i < n; i++) {
@@ -34,6 +35,26 @@ static float bsp_adc_read_voltage(u32 ch_off, float factor) {
     }
     // 12-bit ADC，参考电压 3.3V
     return sum / n / BSP_ADC_REF_RES * BSP_ADC_REF_VOLTAGE * factor;
+}
+
+static u16 bsp_adc_read_voltage_stop_dma(BSP_ADC_CH ch) {
+    u16 value = 0;
+    switch (ch) {
+    case BSP_ADC_SUPPLY_PG:
+    case BSP_ADC_MCU_TEMP:
+        adc_run(false);
+        dma_channel_abort(bsp_adc_ch);
+        adc_fifo_drain();
+        adc_select_input(ch);
+        value = adc_read();
+        adc_select_input(0);
+        dma_channel_configure(adc_dam_ch, &cfg, bsp_adc_buf, &adc_hw->fifo, dma_encode_endless_transfer_count(), true);
+        adc_run(true);
+        break;
+    default:
+        break;
+    }
+    return value;
 }
 
 exit_code_t bsp_adc_init() {
@@ -48,7 +69,7 @@ exit_code_t bsp_adc_init() {
     adc_set_round_robin(0b11);
 
     adc_dam_ch = dma_claim_unused_channel(true);
-    dma_channel_config cfg = dma_channel_get_default_config(adc_dam_ch);
+    cfg = dma_channel_get_default_config(adc_dam_ch);
     channel_config_set_transfer_data_size(&cfg, DMA_SIZE_16);
     channel_config_set_read_increment(&cfg, false);
     channel_config_set_write_increment(&cfg, true);
@@ -69,28 +90,27 @@ u16 bsp_adc_get_raw_value(BSP_ADC_CH ch) {
         // 退 2 格，并强制成目标通道的奇偶性，避开正在被 DMA 改写的槽
         pos = (pos + BSP_ADC_BUF_WORDS - 2u) & (BSP_ADC_BUF_WORDS - 1u);
         pos = (pos & ~1u) | parity;
-        return bsp_adc_buf[pos];
+        raw_value = bsp_adc_buf[pos];
     case BSP_ADC_SUPPLY_PG:
-        break;
     case BSP_ADC_MCU_TEMP:
+        raw_value = bsp_adc_read_voltage_stop_dma(ch);
         break;
     default:
         break;
     }
+    return raw_value;
 }
 
 float bsp_adc_get_value(BSP_ADC_CH ch) {
     float voltage = 0.0f;
     switch (ch) {
     case BSP_ADC_SUPPLY_INPUT_VOLTAGE:
-        voltage = bsp_adc_read_voltage(ch, bsp_adc_ch[ch].factor);
-        break;
     case BSP_ADC_SUPPLY_OUTPUT_VOLTAGE:
         voltage = bsp_adc_read_voltage(ch, bsp_adc_ch[ch].factor);
         break;
-    case BSP_ADC_SUPPLY_PG:
-        break;
+    case BSP_ADC_SUPPLY_PG: 
     case BSP_ADC_MCU_TEMP:
+        voltage = bsp_adc_read_voltage_stop_dma(ch) * bsp_adc_ch[ch].factor;
         break;
     default:
         break;
