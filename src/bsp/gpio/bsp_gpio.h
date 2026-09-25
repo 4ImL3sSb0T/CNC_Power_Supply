@@ -26,3 +26,13 @@ typedef struct {
     bool active_low;
     bool init_active;
 } bsp_gpio_ch_t;
+
+exit_code_t bsp_gpio_init();
+
+bool bsp_gpio_get_active(BSP_GPIO_CH ch);
+exit_code_t bsp_gpio_set_active(BSP_GPIO_CH ch, bool active);
+exit_code_t bsp_gpio_toggle_active(BSP_GPIO_CH ch);
+
+exit_code_t bsp_gpio_irq_attach(BSP_GPIO_CH ch, bsp_gpio_irq_t edge, bsp_gpio_isr_handle isr, void *ctx);
+exit_code_t bsp_gpio_irq_detach(BSP_GPIO_CH ch);
+
