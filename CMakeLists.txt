@@ -87,6 +87,7 @@ add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/src/third_party/CMSIS-DSP/Source CMSI
 # 静态库、够不着，必须自己补一份 —— 否则 FASTBUILD 聚合出来的巨型 .o 会整块进固件
 # （实测 TransformFunctions.c：带选项 170 个 .text.* 段，不带 0 个）。
 target_compile_options(CMSISDSP PRIVATE -ffunction-sections -fdata-sections)
+target_compile_options(CMSISDSP PRIVATE -fno-if-conversion -fno-if-conversion2)
 
 # ====================================================================================
 # 应用源码：自动扫描 src/ 下的 .c / .cpp，新增源文件后不需要再改这个文件
