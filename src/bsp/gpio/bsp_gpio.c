@@ -9,7 +9,11 @@ bsp_gpio_ch_t bsp_gpio_ch[] = {
 };
 
 exit_code_t bsp_gpio_init() {
-    
+    for (u32 index = 0; index < sizeof(bsp_gpio_ch) / sizeof(bsp_gpio_ch[0]); index++) {
+        gpio_set_dir(bsp_gpio_ch[index].gpio, bsp_gpio_ch[index].dir);
+        gpio_put(bsp_gpio_ch[index].gpio, false);
+        gpio_set_function(bsp_gpio_ch[index].gpio, GPIO_FUNC_SIO);
+    }
 }
 
 bool bsp_gpio_get_active(BSP_GPIO_CH ch);
