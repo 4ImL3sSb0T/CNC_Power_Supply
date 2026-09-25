@@ -20,6 +20,13 @@ typedef struct {
 
 exit_code_t bsp_adc_init();
 
+/// @brief 获得最新一次的ADC
+/// @param ch 通道
+/// @return Raw Value
 u16 bsp_adc_get_raw_value(BSP_ADC_CH ch);
+
+
+/// @brief 获得平均的ADC
+/// @param ch 通道
+/// @return 平均值
 float bsp_adc_get_value(BSP_ADC_CH ch);
-float bsp_adc_get_mcu_temp();
