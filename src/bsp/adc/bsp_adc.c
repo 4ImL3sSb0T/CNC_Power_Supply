@@ -12,7 +12,7 @@ __attribute__((aligned(1u << BSP_ADC_RING_BITS)));
 static int adc_dam_ch;
 static dma_channel_config cfg;
 
-bsp_adc_ch_t bsp_adc_ch[] = {
+static const bsp_adc_ch_t bsp_adc_ch[] = {
     [BSP_ADC_SUPPLY_INPUT_VOLTAGE] = {.pin = 26, .factor = 1.0f},
     [BSP_ADC_SUPPLY_OUTPUT_VOLTAGE] = { .pin = 27, .factor = 11.0f},
     [BSP_ADC_SUPPLY_PG] = { .pin = 28, .factor = 1.0f},
@@ -43,7 +43,7 @@ static u16 bsp_adc_read_voltage_stop_dma(BSP_ADC_CH ch) {
     case BSP_ADC_SUPPLY_PG:
     case BSP_ADC_MCU_TEMP:
         adc_run(false);
-        dma_channel_abort(bsp_adc_ch);
+        dma_channel_abort(adc_dam_ch);
         adc_fifo_drain();
         adc_select_input(ch);
         value = adc_read();
