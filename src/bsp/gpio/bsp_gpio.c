@@ -77,7 +77,7 @@ exit_code_t bsp_gpio_irq_attach(BSP_GPIO_CH ch, bsp_gpio_irq_t edge, bsp_gpio_is
     cfg->isr = isr;
     cfg->ctx = ctx;
 
-    pio_set_irq_enabled_with_callback(cfg->gpio, events, true, bsp_gpio_irq_callback);
+    gpio_set_irq_enabled_with_callback(cfg->gpio, events, true, bsp_gpio_irq_callback);
     return EXIT_OK;
 }
 exit_code_t bsp_gpio_irq_detach(BSP_GPIO_CH ch) {

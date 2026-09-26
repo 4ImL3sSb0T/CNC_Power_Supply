@@ -21,13 +21,13 @@ typedef struct {
 
 exit_code_t bsp_adc_init();
 
-/// @brief 获得最新一次的ADC
+/// @brief 获得最新一次的ADC, 绝对不能在中断里读取MCU_TEMP和SUPPLY_PG
 /// @param ch 通道
 /// @return Raw Value
 u16 bsp_adc_get_raw_value(BSP_ADC_CH ch);
 
 
-/// @brief 获得平均的ADC
+/// @brief 获得平均的ADC, 绝对不能在中断里读取MCU_TEMP和SUPPLY_PG
 /// @param ch 通道
 /// @return 平均值
 float bsp_adc_get_value(BSP_ADC_CH ch);

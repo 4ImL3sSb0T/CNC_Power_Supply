@@ -151,6 +151,7 @@ target_link_libraries(CNC_Power_Supply
         hardware_adc
         hardware_spi
         hardware_i2c
+        hardware_pwm
         hardware_dma
         hardware_pio
         hardware_interp

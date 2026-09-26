@@ -91,6 +91,7 @@ u16 bsp_adc_get_raw_value(BSP_ADC_CH ch) {
         pos = (pos + BSP_ADC_BUF_WORDS - 2u) & (BSP_ADC_BUF_WORDS - 1u);
         pos = (pos & ~1u) | parity;
         raw_value = bsp_adc_buf[pos];
+        break;
     case BSP_ADC_SUPPLY_PG:
     case BSP_ADC_MCU_TEMP:
         raw_value = bsp_adc_read_voltage_stop_dma(ch);
