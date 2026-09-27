@@ -319,8 +319,14 @@ static int i2c_dma_write_read_internal(
   // 停止条件时传输即告完成。如果硬件在传输过程中检测到问题，通常会出现一次中止
   // 随后再跟一次停止。也存在检测不到停止和/或中止的情况，这时就需要超时机制来
   // 兜底。例如，当 SDA 被持续拉低时，就检测不到停止条件。
+  // 本地改动：原版写作 I2C_TRANSFER_TIMEOUT_MS * portTICK_PERIOD_MS，量纲是反的
+  // ——portTICK_PERIOD_MS = 1000 / configTICK_RATE_HZ，把毫秒换成节拍应该是
+  // ms / portTICK_PERIOD_MS。本工程 configTICK_RATE_HZ = 1000 时
+  // portTICK_PERIOD_MS == 1，乘除等价，所以这个错误一直没暴露；一旦把节拍降下来，
+  // 这里会等成 (1000 / 节拍) 倍的时间（节拍 100Hz 时"1 秒超时"变成 100 秒）。
+  // 改用 pdMS_TO_TICKS 后与节拍无关。
   const bool timeout = xSemaphoreTake(
-    i2c_dma->semaphore, I2C_TRANSFER_TIMEOUT_MS * portTICK_PERIOD_MS
+    i2c_dma->semaphore, pdMS_TO_TICKS(I2C_TRANSFER_TIMEOUT_MS)
   ) == pdFALSE;
 
   // 如果出现问题，则中止 DMA。
@@ -361,8 +367,9 @@ int i2c_dma_write_read(
   uint8_t *rbuf,
   size_t rbuf_len
 ) {
+  // 本地改动：同 I2C_TRANSFER_TIMEOUT_MS 那处，原版的量纲是反的。
   if (xSemaphoreTake(
-      i2c_dma->mutex, I2C_TAKE_MUTEX_TIMEOUT_MS * portTICK_PERIOD_MS
+      i2c_dma->mutex, pdMS_TO_TICKS(I2C_TAKE_MUTEX_TIMEOUT_MS)
     ) != pdTRUE) {
     return PICO_ERROR_TIMEOUT;
   }

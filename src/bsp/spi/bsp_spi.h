@@ -13,7 +13,6 @@ typedef struct {
     bool cs_active_low;
     u32 baudrate_hz;
     u8  cpol, cpha;
-    bool msb_first;
 } bsp_spi_dev_cfg_t;
 
 exit_code_t bsp_spi_init();
