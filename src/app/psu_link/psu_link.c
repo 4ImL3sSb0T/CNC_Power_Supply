@@ -34,6 +34,7 @@
 #include "config/board_config.h"
 #include "lib/proto/psu_proto.h"
 #include "lib/tools/log_out.h"
+#include "lib/tools/reset_reason.h"
 #include "service/pstore/pstore.h"
 
 /* ---------------- 链路状态（只在 link 任务里读写） ---------------- */
@@ -53,6 +54,10 @@ static u8 s_prev_valid;
 
 /* 主机是否显式设过遥测周期：设过就不再拿持久化配置里的默认值去覆盖它 */
 static u8 s_telem_from_host;
+
+/* 上次复位的原因是否已经报过。只能等主机连上再报：CDC 在 DTR 拉起前写什么都丢，
+ * 而设备重启后 USB 重新枚举要几百毫秒，main() 里那几条启动日志必然赶不上 */
+static u8 s_reset_reported;
 
 /* ---------------- 工具 ---------------- */
 
@@ -772,6 +777,7 @@ exit_code_t psu_link_init(void)
     s_wd_fired_ms = 0u;
     s_prev_valid = 0u;
     s_telem_from_host = 0u;
+    s_reset_reported = 0u;
     memset(&s_prev, 0, sizeof(s_prev));
     return EXIT_OK;
 }
@@ -781,12 +787,20 @@ void psu_link_task(void *pvParameters)
     (void)pvParameters;
 
     for (;;) {
+        /* 主机一连上就把上次复位的原因报出去（打印完会清掉 scratch 标记） */
+        if (!s_reset_reported && tud_cdc_connected()) {
+            s_reset_reported = 1u;
+            reset_reason_report();
+        }
         apply_persisted_cfg();  /* 配置就绪后套用一次（幂等） */
         syscfg_tick();          /* 设定值改动的去抖落盘 */
         rx_poll();              /* 收命令 */
         poll_snapshot();        /* 快照差分 → 事件/测试项上报/安全态日志 */
         wd_check();             /* 主机失联看门狗 */
         telemetry_check();      /* 周期遥测 */
+        /* 收尾：把本轮产生的日志吐给主机（主机没连上时原样留着）。
+         * 放在最后，启动那几条积压的日志也能在第一次循环就发出去 */
+        log_drain();
         vTaskDelay(pdMS_TO_TICKS(PSU_LINK_POLL_MS));
     }
 }

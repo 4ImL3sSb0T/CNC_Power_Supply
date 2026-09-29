@@ -12,6 +12,7 @@
 #include "task.h"
 
 #include "lib/tools/log_out.h"
+#include "lib/tools/reset_reason.h"
 #include "pico/time.h"
 
 void vApplicationStackOverflowHook( TaskHandle_t xTask, char * pcTaskName )
@@ -19,7 +20,11 @@ void vApplicationStackOverflowHook( TaskHandle_t xTask, char * pcTaskName )
     ( void ) xTask;
 
     taskDISABLE_INTERRUPTS();
+    /* 先存证据再打印：打印要走 stdio，这条路在这个上下文里不一定还活着 */
+    reset_reason_mark( RESET_MARK_STACK_OVERFLOW, pcTaskName, 0u );
     log_printf( "!! stack overflow in task \"%s\"", pcTaskName );
+    /* 马上要死循环，没人再有机会 drain 了 —— 趁现在把这条推出去 */
+    ( void ) log_drain();
 
     for( ; ; )
     {
@@ -29,8 +34,10 @@ void vApplicationStackOverflowHook( TaskHandle_t xTask, char * pcTaskName )
 void vApplicationMallocFailedHook( void )
 {
     taskDISABLE_INTERRUPTS();
+    reset_reason_mark( RESET_MARK_MALLOC_FAILED, NULL, ( uint32_t ) configTOTAL_HEAP_SIZE );
     log_printf( "!! pvPortMalloc failed (configTOTAL_HEAP_SIZE = %u)",
             ( unsigned ) configTOTAL_HEAP_SIZE );
+    ( void ) log_drain();
 
     for( ; ; )
     {
@@ -39,6 +46,9 @@ void vApplicationMallocFailedHook( void )
 
 void vApplicationAssertFailed( const char * pcFile, unsigned long ulLine )
 {
+    /* 注意：这条路径**不会**重启，只留个标记就返回（configASSERT 的语义是"记一笔
+     * 然后继续跑"）。所以下次复位时若看到 ASSERT 标记，说明断言之后又出了别的事 */
+    reset_reason_mark( RESET_MARK_ASSERT, pcFile, ( uint32_t ) ulLine );
     log_printf( "!! configASSERT failed at %s:%lu", pcFile, ulLine );
 }
 

@@ -32,7 +32,6 @@
 #include "app/psu_link/psu_link.h"
 #include "app/ui/ui.h"
 #include "service/pstore/pstore.h"
-#include "hardware/structs/powman.h"
 
 // ---------------- CPU 占用率统计 ----------------
 // 基于 FreeRTOS 运行时间统计（FreeRTOSConfig.h 里 configGENERATE_RUN_TIME_STATS）。
@@ -108,21 +107,9 @@ int main()
     pcb_test_bind_keys();
     psu_link_init();
 
-    uint32_t chip_reset_val = powman_hw->chip_reset;
-
-    // 2. 以十六进制格式打印完整的寄存器值
-    log_printf("CHIP_RESET Register: 0x%08X", chip_reset_val);
-
-    // 3. (可选) 进一步解析并打印具体的复位原因位
-    if (chip_reset_val & POWMAN_CHIP_RESET_HAD_POR_BITS) {
-        log_printf("  -> Reset Reason: Power-On Reset (POR)");
-    }
-    if (chip_reset_val & POWMAN_CHIP_RESET_HAD_BOR_BITS) {
-        log_printf("  -> Reset Reason: Brown-Out (BOR)");
-    }
-    if (chip_reset_val & POWMAN_CHIP_RESET_HAD_RUN_LOW_BITS) {
-        log_printf("  -> Reset Reason: RUN Pin");
-    }
+    /* 上次复位的原因不在这里报：设备重启后 USB 要重新枚举，主机连上之前往 CDC 写字
+     * 就是丢进黑洞，而这几行日志会在枚举完成前就跑完。改由 psu_link_task 在主机
+     * 连上的第一时刻报告（见 lib/tools/reset_reason.c） */
 
     log_printf("数控电源v1 测试台启动 | H1: 1=AGND 2=IPWM 3=PWM 4=PG 5=CE# 6=3V3");
     log_printf("按键: 单击=跑测试 双击=步进电压设定 长按=急停");
