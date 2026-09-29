@@ -77,17 +77,36 @@ class PsuGui:
         self._csv_enabled = False
 
         root.title("CNC PSU 上位机 — 数控电源v1 测试台")
-        root.geometry("920x900")
-        root.minsize(820, 760)
 
-        self._build_connect(port, dummy)
-        self._build_setpoints()
-        self._build_telemetry()
-        self._build_test()
-        self._build_store()
-        self._build_curve()
-        self._build_log()
-        self._build_status()
+        # 窗口尺寸按屏幕收敛。内容本来就高，叠上系统 DPI 缩放后固定尺寸很容易超出
+        # 屏幕，底部那块会被顶到屏幕外面去 —— 日志"不见了"就是这么来的
+        scale = root.winfo_fpixels("1i") / 96.0
+        screen_w = int(root.winfo_screenwidth() / scale)
+        screen_h = int(root.winfo_screenheight() / scale)
+        win_w = max(760, min(980, screen_w - 80))
+        win_h = max(560, min(860, screen_h - 120))
+        root.geometry(f"{win_w}x{win_h}")
+        root.minsize(min(760, win_w), min(560, win_h))
+
+        # 状态栏常驻底部：pack 是按调用顺序分配空间的，它必须先占位
+        self._build_status(root)
+
+        # 控制与日志分两页。塞成一页时总高度超过屏幕，排在最后的日志会被挤没
+        self.book = ttk.Notebook(root)
+        self.book.pack(fill="both", expand=True, padx=6, pady=(6, 0))
+        ctrl_page = ttk.Frame(self.book)
+        log_page = ttk.Frame(self.book)
+        self.book.add(ctrl_page, text="控制")
+        self.book.add(log_page, text="日志")
+        self.log_page = log_page
+
+        self._build_connect(ctrl_page, port, dummy)
+        self._build_setpoints(ctrl_page)
+        self._build_telemetry(ctrl_page)
+        self._build_test(ctrl_page)
+        self._build_store(ctrl_page)
+        self._build_log(log_page)
+        self._build_curve(log_page)
 
         self._refresh_ports()
         self._set_connected(False)
@@ -95,8 +114,8 @@ class PsuGui:
         root.after(40, self._pump)
 
     # ================================================================ 界面
-    def _build_connect(self, port: str | None, dummy: bool) -> None:
-        frame = ttk.LabelFrame(self.root, text="链路")
+    def _build_connect(self, parent: tk.Widget, port: str | None, dummy: bool) -> None:
+        frame = ttk.LabelFrame(parent, text="链路")
         frame.pack(fill="x", padx=8, pady=(8, 4))
 
         self.var_port = tk.StringVar(value=DUMMY_LABEL if dummy else (port or ""))
@@ -122,8 +141,8 @@ class PsuGui:
         ttk.Entry(options, textvariable=self.var_telem_ms, width=7).pack(side="left", padx=4)
         ttk.Label(options, text="ms").pack(side="left")
 
-    def _build_setpoints(self) -> None:
-        frame = ttk.LabelFrame(self.root, text="设定（远程模式下生效）")
+    def _build_setpoints(self, parent: tk.Widget) -> None:
+        frame = ttk.LabelFrame(parent, text="设定（远程模式下生效）")
         frame.pack(fill="x", padx=8, pady=4)
 
         # 单位：物理量（V/A）或原始占空比（‰）
@@ -162,8 +181,8 @@ class PsuGui:
         self.btn_safe.pack(side="left", padx=6)
         ttk.Label(buttons, text="（急停会同时退出远程模式）").pack(side="left", padx=6)
 
-    def _build_telemetry(self) -> None:
-        frame = ttk.LabelFrame(self.root, text="遥测")
+    def _build_telemetry(self, parent: tk.Widget) -> None:
+        frame = ttk.LabelFrame(parent, text="遥测")
         frame.pack(fill="x", padx=8, pady=4)
 
         self.lbl_state = tk.Label(frame, text="IDLE", font=("Segoe UI", 16, "bold"), fg="#555555")
@@ -180,9 +199,9 @@ class PsuGui:
         self.lbl_misc = ttk.Label(frame, text="tick —   RTT —", font=("Consolas", 10))
         self.lbl_misc.grid(row=0, column=3, rowspan=2, padx=10, sticky="w")
 
-    def _build_test(self) -> None:
-        frame = ttk.LabelFrame(self.root, text="PCB 测试序列")
-        frame.pack(fill="both", expand=True, padx=8, pady=4)
+    def _build_test(self, parent: tk.Widget) -> None:
+        frame = ttk.LabelFrame(parent, text="PCB 测试序列")
+        frame.pack(fill="x", padx=8, pady=4)
 
         bar = ttk.Frame(frame)
         bar.pack(fill="x", padx=6, pady=4)
@@ -201,15 +220,15 @@ class PsuGui:
         ):
             self.tree.heading(key, text=title)
             self.tree.column(key, width=width, anchor="w")
-        self.tree.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        self.tree.pack(fill="x", padx=6, pady=(0, 6))
         for index in range(7):
             self.tree.insert("", "end", iid=str(index), values=("—", "-", "", ""))
         for result, color in RESULT_COLORS.items():
             self.tree.tag_configure(f"r{result}", foreground=color)
 
-    def _build_store(self) -> None:
+    def _build_store(self, parent: tk.Widget) -> None:
         """设备上的持久化配置与日志（Flash）。"""
-        frame = ttk.LabelFrame(self.root, text="设备存储（掉电保留）")
+        frame = ttk.LabelFrame(parent, text="设备存储（掉电保留）")
         frame.pack(fill="x", padx=8, pady=4)
 
         bar = ttk.Frame(frame)
@@ -225,14 +244,15 @@ class PsuGui:
         ttk.Label(bar, text="（预设值不会自动下发，也不会开输出；结果看下方“设备日志”页）").pack(
             side="left", padx=6)
 
-    def _build_curve(self) -> None:
-        frame = ttk.LabelFrame(self.root, text="实时曲线（最近 60 秒）")
-        frame.pack(fill="both", expand=True, padx=8, pady=4)
-        self.canvas = tk.Canvas(frame, height=180, background="#101418", highlightthickness=0)
-        self.canvas.pack(fill="both", expand=True, padx=6, pady=6)
+    def _build_curve(self, parent: tk.Widget) -> None:
+        frame = ttk.LabelFrame(parent, text="实时曲线（最近 60 秒）")
+        # 固定高度不参与伸缩：日志才是这一页的主角，别跟它抢空间
+        frame.pack(fill="x", padx=8, pady=4)
+        self.canvas = tk.Canvas(frame, height=150, background="#101418", highlightthickness=0)
+        self.canvas.pack(fill="x", padx=6, pady=6)
 
-    def _build_log(self) -> None:
-        frame = ttk.LabelFrame(self.root, text="日志")
+    def _build_log(self, parent: tk.Widget) -> None:
+        frame = ttk.LabelFrame(parent, text="日志")
         frame.pack(fill="both", expand=True, padx=8, pady=4)
 
         bar = ttk.Frame(frame)
@@ -267,9 +287,9 @@ class PsuGui:
         self.log_text.tag_configure("error", foreground="#ff5555")
         self.log_text.configure(state="disabled")
 
-    def _build_status(self) -> None:
-        self.lbl_status = ttk.Label(self.root, text="就绪", foreground="#444444", anchor="w")
-        self.lbl_status.pack(fill="x", padx=10, pady=(0, 6))
+    def _build_status(self, parent: tk.Widget) -> None:
+        self.lbl_status = ttk.Label(parent, text="就绪", foreground="#444444", anchor="w")
+        self.lbl_status.pack(side="bottom", fill="x", padx=10, pady=(4, 6))
 
     # ================================================================ 连接
     def _refresh_ports(self) -> None:
