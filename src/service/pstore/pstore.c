@@ -21,6 +21,7 @@
 #include "pico/time.h"
 #include "service/fs/fs.h"
 #include "lib/proto/psu_proto.h"        /* psu_crc16 / psu_put_* / psu_get_* —— 纯工具，不涉及链路 */
+#include "lib/tools/log_out.h"
 
 #define PSTORE_CFG_DIR   "/cfg"
 #define PSTORE_CFG_PATH  "/cfg/psu.cfg"
@@ -309,7 +310,7 @@ static void init_fs(void)
 
     err = fs_init();
     if (err != LFS_ERR_OK) {
-        printf("[PSTORE] 文件系统不可用（%d），持久化功能关闭\n", err);
+        log_printf("[PSTORE] 文件系统不可用（%d），持久化功能关闭", err);
         return;
     }
     s_lfs = fs_get_handle();
@@ -323,7 +324,7 @@ static void init_fs(void)
     log_scan();
     s_ready = true;
 
-    printf("[PSTORE] 就绪：配置%s，日志 %u 条\n",
+    log_printf("[PSTORE] 就绪：配置%s，日志 %u 条",
            s_cfg_loaded ? "已载入" : "无（用默认值）",
            (unsigned)(s_next_index - s_first_index));
 }

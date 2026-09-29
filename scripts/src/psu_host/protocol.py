@@ -36,6 +36,11 @@ MAX_ENCODED = MAX_BLOCK + 1         # 含尾部 0x00 分隔符 = 55
 MAX_WIRE = MAX_ENCODED + 1          # 再加前置分隔符 = 56（仍 < CDC TX FIFO 的 64）
 MIN_BODY = 5                        # cmd+seq+len+crc16
 
+# 设备 printf 日志的行前缀，每条日志都以它开头（固件侧见 src/lib/tools/log_out.h）。
+# 链路层把解不出帧的块当文本交出来，块里既有真正的日志行，也有被日志打断的半截帧；
+# 靠这个前缀把两者分开 —— 带前缀的进"设备日志"页，不带的当链路杂音。
+LOG_LINE_PREFIX = "# "
+
 
 class ProtocolError(Exception):
     """帧结构不合法（长度字段不符、COBS 块损坏、块内出现 0x00）。"""

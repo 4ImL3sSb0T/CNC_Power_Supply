@@ -77,8 +77,8 @@ class PsuGui:
         self._csv_enabled = False
 
         root.title("CNC PSU 上位机 — 数控电源v1 测试台")
-        root.geometry("900x820")
-        root.minsize(820, 700)
+        root.geometry("920x900")
+        root.minsize(820, 760)
 
         self._build_connect(port, dummy)
         self._build_setpoints()
@@ -222,7 +222,7 @@ class PsuGui:
                    width=12).pack(side="left", padx=6)
         ttk.Button(bar, text="清空日志", command=lambda: self._async(self._do_log_clear),
                    width=12).pack(side="left", padx=6)
-        ttk.Label(bar, text="（预设值不会自动下发，也不会开输出；结果看下方日志窗）").pack(
+        ttk.Label(bar, text="（预设值不会自动下发，也不会开输出；结果看下方“设备日志”页）").pack(
             side="left", padx=6)
 
     def _build_curve(self) -> None:
@@ -232,7 +232,7 @@ class PsuGui:
         self.canvas.pack(fill="both", expand=True, padx=6, pady=6)
 
     def _build_log(self) -> None:
-        frame = ttk.LabelFrame(self.root, text="日志（设备 printf 文本 + 协议事件）")
+        frame = ttk.LabelFrame(self.root, text="日志")
         frame.pack(fill="both", expand=True, padx=8, pady=4)
 
         bar = ttk.Frame(frame)
@@ -243,9 +243,26 @@ class PsuGui:
         self.lbl_csv = ttk.Label(bar, text="（未开始）", foreground="#666666")
         self.lbl_csv.pack(side="left")
 
-        self.log_text = ScrolledText(frame, height=9, font=("Consolas", 9), background="#0f1114", foreground="#dddddd")
-        self.log_text.pack(fill="both", expand=True, padx=6, pady=6)
-        self.log_text.tag_configure("device", foreground="#cccccc")
+        book = ttk.Notebook(frame)
+        book.pack(fill="both", expand=True, padx=6, pady=6)
+
+        # 页 1：设备 printf 文本（固件每条 log_printf 都带 LOG_LINE_PREFIX），
+        # 外加从设备 Flash 读回的持久化记录
+        dev_page = ttk.Frame(book)
+        book.add(dev_page, text="设备日志 (printf)")
+        self.dev_text = ScrolledText(dev_page, height=9, font=("Consolas", 9),
+                                     background="#0f1114", foreground="#dddddd")
+        self.dev_text.pack(fill="both", expand=True)
+        self.dev_text.tag_configure("device", foreground="#cccccc")
+        self.dev_text.tag_configure("noise", foreground="#777777")
+        self.dev_text.configure(state="disabled")
+
+        # 页 2：协议事件 + 上位机自己的操作记录
+        evt_page = ttk.Frame(book)
+        book.add(evt_page, text="协议事件")
+        self.log_text = ScrolledText(evt_page, height=9, font=("Consolas", 9),
+                                     background="#0f1114", foreground="#dddddd")
+        self.log_text.pack(fill="both", expand=True)
         self.log_text.tag_configure("event", foreground="#33bbff")
         self.log_text.tag_configure("error", foreground="#ff5555")
         self.log_text.configure(state="disabled")
@@ -433,11 +450,11 @@ class PsuGui:
         device, info = self._require()
         records = device.read_log()
         if not records:
-            self._post("log", "设备上没有日志记录", "event")
+            self._post("devline", "设备上没有日志记录")
             return
-        self._post("log", f"设备日志共 {len(records)} 条：", "event")
+        self._post("devline", f"设备日志共 {len(records)} 条：")
         for record in records:
-            self._post("log", record.describe(info), "event")
+            self._post("devline", record.describe(info))
 
     def _do_log_clear(self) -> None:
         device, _info = self._require()
@@ -510,20 +527,43 @@ class PsuGui:
             self._post("log", "已停止 CSV 记录", "event")
 
     def _clear_log(self) -> None:
-        self.log_text.configure(state="normal")
-        self.log_text.delete("1.0", "end")
-        self.log_text.configure(state="disabled")
+        for widget in (self.dev_text, self.log_text):
+            widget.configure(state="normal")
+            widget.delete("1.0", "end")
+            widget.configure(state="disabled")
 
-    def _append_log(self, text: str, tag: str) -> None:
-        self.log_text.configure(state="normal")
+    @staticmethod
+    def _append_to(widget: ScrolledText, text: str, tag: str) -> None:
+        """往一个日志窗格追加一行（带本地时间戳）。"""
+        widget.configure(state="normal")
         stamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        self.log_text.insert("end", f"{stamp}  {text}\n", tag)
+        widget.insert("end", f"{stamp}  {text}\n", tag)
         # 只留最近 2000 行，长时间跑不至于把内存吃光
-        lines = int(self.log_text.index("end-1c").split(".")[0])
+        lines = int(widget.index("end-1c").split(".")[0])
         if lines > 2000:
-            self.log_text.delete("1.0", f"{lines - 2000}.0")
-        self.log_text.see("end")
-        self.log_text.configure(state="disabled")
+            widget.delete("1.0", f"{lines - 2000}.0")
+        widget.see("end")
+        widget.configure(state="disabled")
+
+    def _append_event(self, text: str, tag: str) -> None:
+        """协议事件与上位机操作记录 → "协议事件"页。"""
+        self._append_to(self.log_text, text, tag)
+
+    def _append_device(self, block: str) -> None:
+        """设备侧文本块 → "设备日志"页。
+
+        链路层按 0x00 切出来的块可能不止一行，也不保证每行都是真日志：被日志打断的
+        半截帧、误码混在里面。带固件前缀的是 log_printf 打的真日志（剥掉前缀显示），
+        其余标成杂音 —— 不丢，但一眼能看出不是日志。
+        """
+        for line in block.splitlines():
+            line = line.rstrip("\r")
+            if not line:
+                continue
+            if line.startswith(P.LOG_LINE_PREFIX):
+                self._append_to(self.dev_text, line[len(P.LOG_LINE_PREFIX):], "device")
+            else:
+                self._append_to(self.dev_text, f"[杂音] {line}", "noise")
 
     # ================================================================ 线程桥
     def _post(self, kind: str, *payload: object) -> None:
@@ -555,13 +595,20 @@ class PsuGui:
     def _handle_message(self, message: tuple) -> None:
         kind = message[0]
         if kind == "log":
-            self._append_log(str(message[1]), str(message[2]))
+            text, tag = str(message[1]), str(message[2])
+            if tag == "device":
+                self._append_device(text)
+            else:
+                self._append_event(text, tag)
+        elif kind == "devline":
+            # 设备 Flash 里的持久化记录（不是 printf 文本，不需要剥前缀）
+            self._append_to(self.dev_text, str(message[1]), "device")
         elif kind == "telemetry":
             self._update_telemetry(message[1])
         elif kind == "item":
             self._update_item(message[1])
         elif kind == "event":
-            self._append_log(str(message[1]), "event")
+            self._append_event(str(message[1]), "event")
         elif kind == "info":
             self._set_connected(True, message[1])
             self._set_scale_ranges(message[1])

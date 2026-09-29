@@ -1,6 +1,6 @@
 #include "imu.h"
 #include "bsp/i2c/i2c_dma_exit.h"
-#include "stdio.h"
+#include "lib/tools/log_out.h"
 
 #if IMU_USE_DMA
 #include "bsp/i2c/i2c_dma.h"
@@ -29,7 +29,7 @@ exit_code_t imu_init(i2c_inst_t *i2c_instance, u32 sdl_pin, u32 scl_pin) {
 #else
     // 阻塞读取对照模式：直接使用 SDK 的 i2c_*_blocking
     u32 act_baudrate = i2c_init(i2c_instance, IMU_I2C_BAUDRATE_HZ);
-    printf("I2C initialized at %u Hz\n", act_baudrate);
+    log_printf("I2C initialized at %u Hz", act_baudrate);
     gpio_set_function(sdl_pin, GPIO_FUNC_I2C);
     gpio_set_function(scl_pin, GPIO_FUNC_I2C);
     gpio_pull_up(sdl_pin);
@@ -77,11 +77,11 @@ exit_code_t imu_probe_version(void) {
     u8 data[IMU_VERSION_LEN];
     exit_code_t rc = imu_read_reg(IMU_REG_VERSION, data, IMU_VERSION_LEN);
     if (rc != EXIT_OK) {
-        printf("Failed to read IMU version, rc=%d\n", rc);
+        log_printf("Failed to read IMU version, rc=%d", rc);
         return rc;
     }
 
-    printf("Version of IMU: %02X %02X %02X\n", data[0], data[1], data[2]);
+    log_printf("Version of IMU: %02X %02X %02X", data[0], data[1], data[2]);
     return EXIT_OK;
 }
 

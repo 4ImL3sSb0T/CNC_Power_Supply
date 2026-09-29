@@ -8,11 +8,10 @@
  *   configASSERT                    -> vApplicationAssertFailed()
  */
 
-#include <stdio.h>
-
 #include "FreeRTOS.h"
 #include "task.h"
 
+#include "lib/tools/log_out.h"
 #include "pico/time.h"
 
 void vApplicationStackOverflowHook( TaskHandle_t xTask, char * pcTaskName )
@@ -20,7 +19,7 @@ void vApplicationStackOverflowHook( TaskHandle_t xTask, char * pcTaskName )
     ( void ) xTask;
 
     taskDISABLE_INTERRUPTS();
-    printf( "!! stack overflow in task \"%s\"\n", pcTaskName );
+    log_printf( "!! stack overflow in task \"%s\"", pcTaskName );
 
     for( ; ; )
     {
@@ -30,7 +29,7 @@ void vApplicationStackOverflowHook( TaskHandle_t xTask, char * pcTaskName )
 void vApplicationMallocFailedHook( void )
 {
     taskDISABLE_INTERRUPTS();
-    printf( "!! pvPortMalloc failed (configTOTAL_HEAP_SIZE = %u)\n",
+    log_printf( "!! pvPortMalloc failed (configTOTAL_HEAP_SIZE = %u)",
             ( unsigned ) configTOTAL_HEAP_SIZE );
 
     for( ; ; )
@@ -40,7 +39,7 @@ void vApplicationMallocFailedHook( void )
 
 void vApplicationAssertFailed( const char * pcFile, unsigned long ulLine )
 {
-    printf( "!! configASSERT failed at %s:%lu\n", pcFile, ulLine );
+    log_printf( "!! configASSERT failed at %s:%lu", pcFile, ulLine );
 }
 
 /*

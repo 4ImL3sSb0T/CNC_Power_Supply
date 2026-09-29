@@ -21,7 +21,6 @@
 
 #include "app/psu_link/psu_link.h"
 
-#include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
 #include "pico/stdlib.h"
@@ -34,6 +33,7 @@
 #include "bsp/power/pcb_ctrl.h"
 #include "config/board_config.h"
 #include "lib/proto/psu_proto.h"
+#include "lib/tools/log_out.h"
 #include "service/pstore/pstore.h"
 
 /* ---------------- 链路状态（只在 link 任务里读写） ---------------- */
@@ -368,11 +368,11 @@ static void poll_snapshot(void)
             if (snap.run_state == RUN_RUNNING) {
                 u8 d = (u8)TEST_ITEM_COUNT;
                 send_event(PSU_EV_TEST_START, &d, 1);
-                printf("[LINK] 测试序列开始\n");
+                log_printf("[LINK] 测试序列开始");
             } else if (snap.run_state == RUN_DONE || snap.run_state == RUN_ABORTED) {
                 u8 d = (u8)snap.run_state;
                 send_event(PSU_EV_TEST_END, &d, 1);
-                printf("[LINK] 测试序列结束（%s）\n", (snap.run_state == RUN_DONE) ? "完成" : "中止");
+                log_printf("[LINK] 测试序列结束（%s）", (snap.run_state == RUN_DONE) ? "完成" : "中止");
             }
         }
 
@@ -382,7 +382,7 @@ static void poll_snapshot(void)
             if (!snap.remote) {
                 /* 本地长按急停或看门狗把远程模式退掉了：看门狗同时撤销 */
                 s_wd_timeout_ms = 0u;
-                printf("[LINK] 远程模式结束（本地接管）\n");
+                log_printf("[LINK] 远程模式结束（本地接管）");
             }
         }
 
@@ -397,7 +397,7 @@ static void poll_snapshot(void)
             rec.ipwm_permille = snap.ipwm_permille;
             rec.arg = (snap.safe_reason == (u8)TEST_SAFE_REASON_WATCHDOG) ? s_wd_fired_ms : 0u;
             (void)pstore_log_append(&rec);
-            printf("[LINK] 已记录回安全态事件（原因 %u）\n", (unsigned)snap.safe_reason);
+            log_printf("[LINK] 已记录回安全态事件（原因 %u）", (unsigned)snap.safe_reason);
         }
 
         for (i = 0; i < TEST_ITEM_COUNT; i++) {
@@ -435,7 +435,7 @@ static void wd_check(void)
     psu_put_u16(d, (u16)s_wd_timeout_ms);
     s_wd_timeout_ms = 0u;
     send_event(PSU_EV_WATCHDOG, d, sizeof(d));
-    printf("[LINK] 看门狗超时：已回安全态并退出远程\n");
+    log_printf("[LINK] 看门狗超时：已回安全态并退出远程");
 }
 
 /* ---------------- 命令分派 ---------------- */
@@ -661,7 +661,7 @@ static void handle_frame(const psu_frame_t *f)
                 /* 远程模式的真值由 pcb_test_task 写进快照；这里只武装看门狗并给足第一个窗口 */
                 s_wd_timeout_ms = (enable != 0u) ? timeout : 0u;
                 s_wd_last_ms = now_ms();
-                printf("[LINK] 远程模式 %s（看门狗 %ums）\n", enable ? "开启" : "关闭",
+                log_printf("[LINK] 远程模式 %s（看门狗 %ums）", enable ? "开启" : "关闭",
                        (unsigned)s_wd_timeout_ms);
             }
             send_ack(f->seq, f->cmd, rc, timeout);

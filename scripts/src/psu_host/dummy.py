@@ -172,11 +172,12 @@ class DummyTransport(Transport):
             self._lock.notify_all()
 
     def _text(self, line: str) -> None:
-        """模仿固件 printf：文本不带 0x00，靠下一条帧的 0x00 才被分出来。"""
+        """模仿固件 printf：文本不带 0x00，靠下一条帧的 0x00 才被分出来；
+        行首带 LOG_LINE_PREFIX，与固件的 log_printf 一致。"""
         with self._lock:
             if self._closed:
                 return
-            self._out += (line + "\n").encode("utf-8")
+            self._out += f"{P.LOG_LINE_PREFIX}{line}\n".encode("utf-8")
             self._lock.notify_all()
 
     def _ack(self, seq: int, cmd: int, code: int = 0, arg: int = 0) -> None:

@@ -1,5 +1,5 @@
 #include "common_def.h"
-#include <stdio.h>
+#include "lib/tools/log_out.h"
 
 const char *error_code_name(exit_code_t code) {
     switch (code)
@@ -33,13 +33,13 @@ void assert_fun(exit_code_t code) {
     case EXIT_OK:
         break;
     case EXIT_SKIP:
-        printf("%s\n", name);
+        log_printf("%s", name);
         break;
     case EXIT_IN_PROGRESS:
-        printf("%s\n", name);
+        log_printf("%s", name);
         break;
     default:
-        printf("%s\n", name);
+        log_printf("%s", name);
         break;
     }
 }

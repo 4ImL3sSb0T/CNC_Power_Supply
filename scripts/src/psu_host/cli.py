@@ -117,7 +117,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 # ---------------------------------------------------------------- 打印助手
 def _log_text(text: str) -> None:
-    print(f"  · {text}", file=sys.stdout, flush=True)
+    """设备侧文本块：逐行打。带固件前缀的是真日志（剥掉前缀），其余原样保留
+    —— 半截帧乱码有时正是要看的线索。"""
+    for line in text.splitlines():
+        line = line.rstrip("\r")
+        if not line:
+            continue
+        if line.startswith(P.LOG_LINE_PREFIX):
+            line = line[len(P.LOG_LINE_PREFIX):]
+        print(f"  · {line}", file=sys.stdout, flush=True)
 
 
 def print_info(info: Info, dev: PsuDevice) -> None:

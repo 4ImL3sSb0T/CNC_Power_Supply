@@ -20,13 +20,13 @@
 
 #include "app/syscfg/syscfg.h"
 
-#include <stdio.h>
 #include <string.h>
 
 #include "pico/time.h"
 
 #include "app/psu_link/psu_link.h"
 #include "lib/proto/psu_proto.h"
+#include "lib/tools/log_out.h"
 #include "service/pstore/pstore.h"
 
 #define SYSCFG_MAGIC     0x31554350u
@@ -138,7 +138,7 @@ bool syscfg_ensure_loaded(void)
         write_back = true;
     } else {
         s_loaded = false;               /* 文件在但校验不过：保留原文件当证据，不覆写 */
-        printf("[SYSCFG] 配置不可用（%d），本次用默认值\n", rc);
+        log_printf("[SYSCFG] 配置不可用（%d），本次用默认值", rc);
     }
 
     s_cfg.boot_count++;
@@ -147,7 +147,7 @@ bool syscfg_ensure_loaded(void)
     }
     log_boot();
 
-    printf("[SYSCFG] 配置%s：遥测 %ums，预设 VOUT %u‰ / ILIM %u‰，启动序号 %u\n",
+    log_printf("[SYSCFG] 配置%s：遥测 %ums，预设 VOUT %u‰ / ILIM %u‰，启动序号 %u",
            s_loaded ? "已载入" : "用默认值",
            (unsigned)s_cfg.telem_period_ms, (unsigned)s_cfg.vout_permille,
            (unsigned)s_cfg.ilim_permille, (unsigned)s_cfg.boot_count);

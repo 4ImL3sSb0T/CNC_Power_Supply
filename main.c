@@ -15,12 +15,12 @@
  * IPWM 悬空芯片不能正常工作，必须最先置安全态（CE# 关断、IPWM 0%）。
  */
 
-#include <stdio.h>
 #include "pico/stdlib.h"
 #include "FreeRTOS.h"
 #include "task.h"
 
 #include "config/board_config.h"
+#include "lib/tools/log_out.h"
 #include "bsp/power/pcb_ctrl.h"
 #include "bsp/input/key.h"
 #include "bsp/lcd/spi.h"
@@ -32,6 +32,7 @@
 #include "app/psu_link/psu_link.h"
 #include "app/ui/ui.h"
 #include "service/pstore/pstore.h"
+#include "hardware/structs/powman.h"
 
 // ---------------- CPU 占用率统计 ----------------
 // 基于 FreeRTOS 运行时间统计（FreeRTOSConfig.h 里 configGENERATE_RUN_TIME_STATS）。
@@ -56,7 +57,7 @@ static void sysmon_task(void *pvParameters)
         u32 idle0_now = ulTaskGetRunTimeCounter(xTaskGetIdleTaskHandleForCore(0));
         u32 idle1_now = ulTaskGetRunTimeCounter(xTaskGetIdleTaskHandleForCore(1));
 
-        printf("TEST %5.1f%%/核 | 空闲 core0 %5.1f%% core1 %5.1f%%\n",
+        log_printf("TEST %5.1f%%/核 | 空闲 core0 %5.1f%% core1 %5.1f%%",
                (test_now - prev_test) / 10000.0f,
                (idle0_now - prev_idle0) / 10000.0f,
                (idle1_now - prev_idle1) / 10000.0f);
@@ -107,8 +108,24 @@ int main()
     pcb_test_bind_keys();
     psu_link_init();
 
-    printf("数控电源v1 测试台启动 | H1: 1=AGND 2=IPWM 3=PWM 4=PG 5=CE# 6=3V3\n");
-    printf("按键: 单击=跑测试 双击=步进电压设定 长按=急停\n");
+    uint32_t chip_reset_val = powman_hw->chip_reset;
+
+    // 2. 以十六进制格式打印完整的寄存器值
+    log_printf("CHIP_RESET Register: 0x%08X", chip_reset_val);
+
+    // 3. (可选) 进一步解析并打印具体的复位原因位
+    if (chip_reset_val & POWMAN_CHIP_RESET_HAD_POR_BITS) {
+        log_printf("  -> Reset Reason: Power-On Reset (POR)");
+    }
+    if (chip_reset_val & POWMAN_CHIP_RESET_HAD_BOR_BITS) {
+        log_printf("  -> Reset Reason: Brown-Out (BOR)");
+    }
+    if (chip_reset_val & POWMAN_CHIP_RESET_HAD_RUN_LOW_BITS) {
+        log_printf("  -> Reset Reason: RUN Pin");
+    }
+
+    log_printf("数控电源v1 测试台启动 | H1: 1=AGND 2=IPWM 3=PWM 4=PG 5=CE# 6=3V3");
+    log_printf("按键: 单击=跑测试 双击=步进电压设定 长按=急停");
 
     xTaskCreate(pcb_test_task, "Test Task", configMINIMAL_STACK_SIZE * 2, NULL, tskIDLE_PRIORITY + 1, &s_test_task);
     xTaskCreate(ui_task, "UI Task", configMINIMAL_STACK_SIZE * 2, display, tskIDLE_PRIORITY + 1, NULL);
@@ -122,6 +139,6 @@ int main()
     /* 优先级 +2：命令响应优先于 UI/测试，仍低于定时器任务 */
     xTaskCreate(psu_link_task, "Link Task", configMINIMAL_STACK_SIZE * 3, NULL, tskIDLE_PRIORITY + 2, NULL);
 
-    printf("Starting FreeRTOS scheduler...\n");
+    log_printf("Starting FreeRTOS scheduler...");
     vTaskStartScheduler();
 }

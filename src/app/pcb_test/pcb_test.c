@@ -32,6 +32,7 @@
 #include "bsp/power/pcb_ctrl.h"
 #include "bsp/input/key.h"
 #include "lib/tools/vec_math.h"
+#include "lib/tools/log_out.h"
 #include "driver/imu/imu.h"
 
 typedef test_result_t (*test_fn_t)(char *detail, u32 n);
@@ -234,7 +235,7 @@ static test_result_t item_pwm_sweep(char *d, u32 n)
             }
         }
 #endif
-        printf("[PWM-SWEEP] D=%u%% VSET=%umV PG=%umV\n",
+        log_printf("[PWM-SWEEP] D=%u%% VSET=%umV PG=%umV",
                (unsigned)s_sweep_steps[i] / 10u,
                (unsigned)pcb_ctrl_vout_setpoint_mv(),
                (unsigned)pcb_ctrl_pg_node_mv());
@@ -270,7 +271,7 @@ static test_result_t item_ipwm_sweep(char *d, u32 n)
         pcb_ctrl_set_ipwm_duty(s_sweep_steps[i]);
         vTaskDelay(pdMS_TO_TICKS(PCB_IPWM_SETTLE_MS));
         refresh_live();
-        printf("[IPWM-SWEEP] D=%u%% ILIM=%umA\n",
+        log_printf("[IPWM-SWEEP] D=%u%% ILIM=%umA",
                (unsigned)s_sweep_steps[i] / 10u,
                (unsigned)pcb_ctrl_ilim2_setpoint_ma());
     }
@@ -321,7 +322,7 @@ static void run_sequence(void)
     s_status.manual_mode = 0;
     status_unlock();
 
-    printf("==== PCB 测试开始 ====\n");
+    log_printf("==== PCB 测试开始 ====");
 
     for (i = 0; i < TEST_ITEM_COUNT; i++) {
         char detail[TEST_DETAIL_LEN];
@@ -345,7 +346,7 @@ static void run_sequence(void)
         s_status.items[i].result = TRES_RUNNING;
         status_unlock();
 
-        printf("[%u/%u] %s ...\n", (unsigned)(i + 1), (unsigned)TEST_ITEM_COUNT, s_cases[i].name);
+        log_printf("[%u/%u] %s ...", (unsigned)(i + 1), (unsigned)TEST_ITEM_COUNT, s_cases[i].name);
 
         t0 = time_us_32();
         detail[0] = '\0';
@@ -358,7 +359,7 @@ static void run_sequence(void)
         s_status.items[i].elapsed_ms = dt_ms;
         status_unlock();
 
-        printf("[%u/%u] %s -> %s %s (%ums)\n",
+        log_printf("[%u/%u] %s -> %s %s (%ums)",
                (unsigned)(i + 1), (unsigned)TEST_ITEM_COUNT, s_cases[i].name,
                result_name(result), detail, (unsigned)dt_ms);
     }
@@ -369,7 +370,7 @@ static void run_sequence(void)
     status_lock();
     s_status.run_state = s_abort ? RUN_ABORTED : RUN_DONE;
     status_unlock();
-    printf("==== PCB 测试结束 (%s) ====\n", s_abort ? "已急停" : "完成");
+    log_printf("==== PCB 测试结束 (%s) ====", s_abort ? "已急停" : "完成");
 }
 
 /* 手动步进：5 个电压设定点循环，首次进入会开输出（IPWM=100%） */
@@ -390,7 +391,7 @@ static void manual_step(void)
     pcb_ctrl_set_pwm_duty(s_sweep_steps[idx]);
     refresh_live();
 
-    printf("[MANUAL] D=%u%% VSET=%umV CE=ON\n",
+    log_printf("[MANUAL] D=%u%% VSET=%umV CE=ON",
            (unsigned)s_sweep_steps[idx] / 10u,
            (unsigned)pcb_ctrl_vout_setpoint_mv());
 }
@@ -412,7 +413,7 @@ static void handle_cmd(const pcb_test_cmd_t *cmd)
         pcb_ctrl_set_pwm_duty(cmd->arg);
         set_manual(1);
         refresh_live();
-        printf("[SET] VSET=%umV (D=%u%%)\n",
+        log_printf("[SET] VSET=%umV (D=%u%%)",
                (unsigned)pcb_ctrl_vout_setpoint_mv(), (unsigned)(cmd->arg / 10u));
         break;
 
@@ -420,7 +421,7 @@ static void handle_cmd(const pcb_test_cmd_t *cmd)
         pcb_ctrl_set_ipwm_duty(cmd->arg);
         set_manual(1);
         refresh_live();
-        printf("[SET] ILIM=%umA (D=%u%%)\n",
+        log_printf("[SET] ILIM=%umA (D=%u%%)",
                (unsigned)pcb_ctrl_ilim2_setpoint_ma(), (unsigned)(cmd->arg / 10u));
         break;
 
@@ -428,7 +429,7 @@ static void handle_cmd(const pcb_test_cmd_t *cmd)
         pcb_ctrl_ce(cmd->arg != 0u);
         set_manual(1);
         refresh_live();
-        printf("[SET] CE=%s\n", (cmd->arg != 0u) ? "ON" : "OFF");
+        log_printf("[SET] CE=%s", (cmd->arg != 0u) ? "ON" : "OFF");
         break;
 
     case PCB_TEST_CMD_MANUAL_STEP:
@@ -449,7 +450,7 @@ static void handle_cmd(const pcb_test_cmd_t *cmd)
         if (s_status.run_state != RUN_RUNNING) {
             s_abort = 0;
         }
-        printf("[STOP] 中止请求\n");
+        log_printf("[STOP] 中止请求");
         break;
 
     case PCB_TEST_CMD_SAFE:
@@ -466,7 +467,7 @@ static void handle_cmd(const pcb_test_cmd_t *cmd)
         s_remote_mode = 0;              /* 本地急停即退出远程，上位机会收到 EV_REMOTE */
         s_abort = 0;
         refresh_live();
-        printf("[SAFE] 安全态：CE# 关断、PWM 0%%、IPWM 0%%（原因 %u）\n", (unsigned)reason);
+        log_printf("[SAFE] 安全态：CE# 关断、PWM 0%%、IPWM 0%%（原因 %u）", (unsigned)reason);
         break;
     }
 
