@@ -59,6 +59,12 @@ typedef enum {
     PSU_CMD_SET_REMOTE  = 0x0A,     /* u8 enable, u16 timeout_ms → ACK */
     PSU_CMD_GET_STATUS  = 0x0B,     /* 无                        → STATUS + 若干 ITEM */
     PSU_CMD_KEEPALIVE   = 0x0C,     /* u32 host_ms               → ACK */
+    PSU_CMD_CFG_GET     = 0x0D,     /* 无                        → CFG（16 字节语义字段） */
+    PSU_CMD_CFG_SET     = 0x0E,     /* u8 field, u16 value       → ACK(arg = 生效值) */
+    PSU_CMD_CFG_RESET   = 0x0F,     /* 无                        → ACK（恢复默认值并落盘） */
+    PSU_CMD_LOG_INFO    = 0x10,     /* 无                        → LOGINFO */
+    PSU_CMD_LOG_READ    = 0x11,     /* u32 rec_index, u8 nrec    → LOGDATA（nrec ≤ 2） */
+    PSU_CMD_LOG_CLEAR   = 0x12,     /* 无                        → ACK（清空全部日志段） */
 } psu_cmd_t;
 
 /* ---------------------------------------------------------------- */
@@ -72,7 +78,45 @@ typedef enum {
     PSU_RSP_EVENT   = 0x85,         /* u8 event, 事件相关数据 */
     PSU_RSP_ITEM    = 0x86,         /* 测试项状态变化，42 字节 */
     PSU_RSP_STATUS  = 0x8B,         /* TELEM 16 字节 + u8 item_results[7] + u8 reserved = 24 */
+    PSU_RSP_CFG     = 0x8C,         /* 见 psu_cfg_state_t，16 字节 */
+    PSU_RSP_LOGINFO = 0x8D,         /* u8 rec_size, u8 seg_count, u16 seg_size, u32 total,
+                                       u32 first_index = 12 字节 */
+    PSU_RSP_LOGDATA = 0x8E,         /* u8 nrec_returned, u8 rec[nrec_returned][16] ≤ 33 字节 */
 } psu_rsp_t;
+
+/* ---------------------------------------------------------------- */
+/* 持久化配置（PSU_CMD_CFG_GET/SET 的 field 与响应）                  */
+/* ---------------------------------------------------------------- */
+
+/* CFG_SET 的 field：配置是一份"预设"，不是实时设定值的镜像。
+ * VOUT/ILIM 用 mV/mA（和 SET_VOUT/SET_ILIM 一致），设备侧换算成占空比‰存盘。 */
+typedef enum {
+    PSU_CFG_F_TELEM_PERIOD = 1,     /* ms，0 或 20–1000；改动立即生效 */
+    PSU_CFG_F_WD_TIMEOUT   = 2,     /* ms，0 或 200–60000；只作为下次 SET_REMOTE 的建议值 */
+    PSU_CFG_F_VOUT         = 3,     /* mV；ACK arg 回生效占空比‰ */
+    PSU_CFG_F_ILIM         = 4,     /* mA；ACK arg 回生效占空比‰ */
+} psu_cfg_field_t;
+
+/* PSU_RSP_CFG 的 flags 位 */
+#define PSU_CFG_FLAG_LOADED     0x01u   /* 配置来自 Flash（否则是默认值） */
+#define PSU_CFG_FLAG_DIRTY      0x02u   /* 有改动还没落盘 */
+#define PSU_CFG_FLAG_DEFAULT    0x04u   /* 正在用默认值（无文件，或文件校验不过） */
+
+/* 日志记录（PSU_RSP_LOGDATA 里的定长条目，也是 pstore 的落盘格式） */
+#define PSU_LOG_REC_SIZE        16u
+#define PSU_LOG_READ_MAX        2u      /* 一次 LOG_READ 最多取回几条（48 字节 payload 上限） */
+
+typedef enum {
+    PSU_LOG_BOOT = 1,               /* a/b = 固件主/次版本，arg = 启动序号 */
+    PSU_LOG_SAFE = 2,               /* a = 回安全态的原因，arg = 看门狗超时值(ms) */
+} psu_log_type_t;
+
+/* PSU_LOG_SAFE 的原因（与 pcb_test 的 test_safe_reason_t 一一对应） */
+typedef enum {
+    PSU_SAFE_REASON_LOCAL_KEY = 1,  /* 本地按键长按急停 */
+    PSU_SAFE_REASON_HOST      = 2,  /* 上位机 SAFE_STATE */
+    PSU_SAFE_REASON_WATCHDOG  = 3,  /* 上位机失联看门狗超时 */
+} psu_safe_reason_t;
 
 /* SET_VOUT / SET_ILIM 的取值单位 */
 typedef enum {
@@ -101,6 +145,20 @@ typedef struct {
 #define PSU_CAP_VOUT_SENSE      0x04u   /* 实测 VOUT 通道已启用（板上有分压） */
 #define PSU_CAP_REMOTE          0x08u   /* 支持远程模式 */
 #define PSU_CAP_TELEM_PERIOD    0x10u   /* 支持配置遥测周期 */
+#define PSU_CAP_CFG             0x20u   /* 支持持久化配置（CFG_GET/SET/RESET） */
+#define PSU_CAP_STORE           0x40u   /* 支持日志持久化（LOG_INFO/READ/CLEAR） */
+
+/* PSU_RSP_CFG 的 payload（16 字节）。给的是语义字段，不是设备上的落盘布局 ——
+ * 磁盘格式属于实现细节，改它不该改协议。 */
+typedef struct {
+    u8  version;                    /* 配置结构版本 */
+    u8  flags;                      /* PSU_CFG_FLAG_* */
+    u16 telem_period_ms;            /* 遥测周期，0 = 停止上报 */
+    u16 wd_timeout_ms;              /* 看门狗建议超时（不代表已武装） */
+    u16 vout_permille;              /* 预设电压设定（占空比‰） */
+    u16 ilim_permille;              /* 预设限流设定（占空比‰） */
+    u32 boot_count;                 /* 累计上电次数 */
+} psu_cfg_state_t;                  /* 不含尾部 u16 reserved，见 psu_link 的 send_cfg */
 
 /* 周期遥测（PSU_RSP_TELEM 的 payload，也是 PSU_RSP_STATUS 的前 16 字节） */
 typedef struct {

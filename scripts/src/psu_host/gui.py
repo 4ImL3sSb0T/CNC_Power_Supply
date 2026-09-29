@@ -84,6 +84,7 @@ class PsuGui:
         self._build_setpoints()
         self._build_telemetry()
         self._build_test()
+        self._build_store()
         self._build_curve()
         self._build_log()
         self._build_status()
@@ -205,6 +206,24 @@ class PsuGui:
             self.tree.insert("", "end", iid=str(index), values=("—", "-", "", ""))
         for result, color in RESULT_COLORS.items():
             self.tree.tag_configure(f"r{result}", foreground=color)
+
+    def _build_store(self) -> None:
+        """设备上的持久化配置与日志（Flash）。"""
+        frame = ttk.LabelFrame(self.root, text="设备存储（掉电保留）")
+        frame.pack(fill="x", padx=8, pady=4)
+
+        bar = ttk.Frame(frame)
+        bar.pack(fill="x", padx=6, pady=4)
+        ttk.Button(bar, text="读配置", command=lambda: self._async(self._do_cfg_get),
+                   width=12).pack(side="left")
+        ttk.Button(bar, text="恢复预设", command=lambda: self._async(self._do_cfg_restore),
+                   width=12).pack(side="left", padx=6)
+        ttk.Button(bar, text="下载日志", command=lambda: self._async(self._do_log_dump),
+                   width=12).pack(side="left", padx=6)
+        ttk.Button(bar, text="清空日志", command=lambda: self._async(self._do_log_clear),
+                   width=12).pack(side="left", padx=6)
+        ttk.Label(bar, text="（预设值不会自动下发，也不会开输出；结果看下方日志窗）").pack(
+            side="left", padx=6)
 
     def _build_curve(self) -> None:
         frame = ttk.LabelFrame(self.root, text="实时曲线（最近 60 秒）")
@@ -393,6 +412,37 @@ class PsuGui:
         device, _info = self._require()
         device.stop_test()
         self._post("log", "已请求停止测试序列", "event")
+
+    # ---------------- 设备存储（配置 / 日志） ----------------
+    def _do_cfg_get(self) -> None:
+        device, _info = self._require()
+        cfg = device.get_config()
+        source = "Flash" if cfg.loaded else "默认值"
+        self._post("log", f"配置（{source}{'，有改动未落盘' if cfg.dirty else ''}）："
+                          f"遥测 {cfg.telem_period_ms}ms，看门狗建议 {cfg.wd_timeout_ms}ms，"
+                          f"预设 VOUT {cfg.vout_permille}‰ / ILIM {cfg.ilim_permille}‰，"
+                          f"启动序号 {cfg.boot_count}", "event")
+
+    def _do_cfg_restore(self) -> None:
+        device, _info = self._require()
+        cfg = device.restore_config()
+        self._post("log", f"已按预设下发 VOUT {cfg.vout_permille}‰ / ILIM "
+                          f"{cfg.ilim_permille}‰（CE# 仍关断）", "event")
+
+    def _do_log_dump(self) -> None:
+        device, info = self._require()
+        records = device.read_log()
+        if not records:
+            self._post("log", "设备上没有日志记录", "event")
+            return
+        self._post("log", f"设备日志共 {len(records)} 条：", "event")
+        for record in records:
+            self._post("log", record.describe(info), "event")
+
+    def _do_log_clear(self) -> None:
+        device, _info = self._require()
+        device.clear_log()
+        self._post("log", "已请求清空设备日志", "event")
 
     def _require(self) -> tuple[PsuDevice, Info | None]:
         if self.device is None:

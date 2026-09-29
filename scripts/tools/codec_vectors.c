@@ -79,5 +79,28 @@ int main(void)
     memset(payload, 0, sizeof(payload));
     dump("ITEM", PSU_RSP_ITEM, 0, payload, PSU_ITEM_PAYLOAD_LEN);
 
+    /* 持久化配置与日志：布局见 psu_proto.h 的 psu_cfg_state_t / psu_log_* */
+    memset(payload, 0, sizeof(payload));
+    payload[0] = 1;                                             /* version */
+    payload[1] = PSU_CFG_FLAG_LOADED;
+    psu_put_u16(&payload[2], 200);                              /* telem_period_ms */
+    psu_put_u16(&payload[4], 3000);                             /* wd_timeout_ms */
+    psu_put_u16(&payload[6], 415);                              /* vout_permille */
+    psu_put_u16(&payload[8], 1000);                             /* ilim_permille */
+    psu_put_u32(&payload[10], 42);                              /* boot_count */
+    dump("CFG", PSU_RSP_CFG, 3, payload, 16);
+
+    memset(payload, 0, sizeof(payload));
+    psu_put_u32(&payload[0], 0x123);                            /* rec_index */
+    payload[4] = 2;                                             /* nrec */
+    dump("LOG_READ", PSU_CMD_LOG_READ, 4, payload, 5);
+
+    memset(payload, 0, sizeof(payload));
+    payload[0] = 2;                                             /* 返回 2 条 */
+    for (i = 0; i < 2u * PSU_LOG_REC_SIZE; i++) {
+        payload[1u + i] = (u8)i;                                /* 记录内容 0x00..0x1F */
+    }
+    dump("LOGDATA", PSU_RSP_LOGDATA, 0, payload, 1u + 2u * PSU_LOG_REC_SIZE);
+
     return 0;
 }

@@ -9,7 +9,7 @@
  *   sysmon_task    CPU 占用率统计（串口，1s）
  *   led_task       心跳灯 500ms
  *   psu_link_task  上位机协议（USB CDC：命令/遥测/事件/看门狗）
- *   fs_test_task   文件系统冒烟测试（挂载 + boot count 打点，跑完自删）
+ *   pstore_task    文件系统与持久化（配置落盘 + 事件日志，独占 Flash 写）
  *
  * 上电第一件事是 pcb_ctrl_init()：SC8701 的 /CE 悬空即上电使能、
  * IPWM 悬空芯片不能正常工作，必须最先置安全态（CE# 关断、IPWM 0%）。
@@ -30,8 +30,8 @@
 #include "driver/led/led.h"
 #include "app/pcb_test/pcb_test.h"
 #include "app/psu_link/psu_link.h"
-#include "app/fs_test/fs_test.h"
 #include "app/ui/ui.h"
+#include "service/pstore/pstore.h"
 
 // ---------------- CPU 占用率统计 ----------------
 // 基于 FreeRTOS 运行时间统计（FreeRTOSConfig.h 里 configGENERATE_RUN_TIME_STATS）。
@@ -115,8 +115,10 @@ int main()
     xTaskCreate(key_task, "Key Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, NULL);
     xTaskCreate(sysmon_task, "SysMon Task", configMINIMAL_STACK_SIZE * 2, NULL, tskIDLE_PRIORITY + 1, NULL);
     xTaskCreate(led_task, "LED Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, NULL);
-    /* 文件系统只能在调度器起来后挂载（写 Flash 要跨核锁另一核），所以放任务里 */
-    xTaskCreate(fs_test_task, "FS Task", configMINIMAL_STACK_SIZE * 2, NULL, tskIDLE_PRIORITY + 1, NULL);
+    /* 文件系统与持久化：只能在调度器起来后挂载（写 Flash 要跨核锁另一核），所以放任务里。
+     * 常驻任务，独占所有 Flash 写（配置落盘 + 事件日志），链路任务不受其阻塞。
+     * 栈给 3 KiB：littlefs 的目录遍历/压缩比看上去要费栈（configCHECK_FOR_STACK_OVERFLOW=2） */
+    xTaskCreate(pstore_task, "Store Task", configMINIMAL_STACK_SIZE * 3, NULL, tskIDLE_PRIORITY + 1, NULL);
     /* 优先级 +2：命令响应优先于 UI/测试，仍低于定时器任务 */
     xTaskCreate(psu_link_task, "Link Task", configMINIMAL_STACK_SIZE * 3, NULL, tskIDLE_PRIORITY + 2, NULL);
 

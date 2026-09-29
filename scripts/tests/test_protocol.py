@@ -90,8 +90,17 @@ def test_frame_round_trip_all_commands():
         (P.Cmd.SET_REMOTE, P.payload_set_remote(True, 3000)),
         (P.Cmd.GET_STATUS, b""),
         (P.Cmd.KEEPALIVE, P.pack_u32(12345678)),
+        (P.Cmd.CFG_GET, b""),
+        (P.Cmd.CFG_SET, P.cfg_set_payload(P.CfgField.VOUT, 12350)),
+        (P.Cmd.CFG_RESET, b""),
+        (P.Cmd.LOG_INFO, b""),
+        (P.Cmd.LOG_READ, P.log_read_payload(0x123, 2)),
+        (P.Cmd.LOG_CLEAR, b""),
         (P.Rsp.TELEM, bytes(16)),
         (P.Rsp.ACK, struct.pack("<BbH", P.Cmd.SET_VOUT, -6, 433)),
+        (P.Rsp.CFG, bytes(P.CFG_STATE_LEN)),
+        (P.Rsp.LOGINFO, bytes(12)),
+        (P.Rsp.LOGDATA, b"\x02" + bytes(2 * P.LOG_REC_SIZE)),
         (P.Rsp.ITEM, bytes(P.ITEM_PAYLOAD_LEN)),
     ]
     for seq, (cmd, payload) in enumerate(cases, start=1):
@@ -113,6 +122,18 @@ def test_golden_vectors_pin_the_wire_format():
     assert P.encode_frame(P.Cmd.SAFE_STATE, 255, b"").hex() == "000306ff03c37d00"
     assert P.encode_frame(P.Rsp.TELEM, 0, bytes(range(16))).hex() == (
         "0002830210120102030405060708090a0b0c0d0e0f941c00"
+    )
+    # 持久化配置：version=1, flags=已加载, telem=200, wd=3000, vout=415‰, ilim=1000‰, boot=42
+    cfg = struct.pack("<BBHHHHIH", 1, P.CFG_FLAG_LOADED, 200, 3000, 415, 1000, 42, 0)
+    assert P.encode_frame(P.Rsp.CFG, 3, cfg).hex() == "00078c03100101c808b80b9f01e8032a01010101035e8c00"
+    # 日志：按记录号 0x123 取 2 条
+    assert P.encode_frame(P.Cmd.LOG_READ, 4, P.log_read_payload(0x123, 2)).hex() == (
+        "000611040523010104020e7900"
+    )
+    # 日志数据：2 条记录，内容分别是 0x00..0x0F 与 0x10..0x1F
+    two_records = bytes((2,)) + bytes(range(32))
+    assert P.encode_frame(P.Rsp.LOGDATA, 0, two_records).hex() == (
+        "00028e032102220102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f1e3d00"
     )
 
 
@@ -227,6 +248,53 @@ def test_item_frame_and_status_parse():
 def test_event_parse():
     event, data = P.parse_event(bytes((P.Event.WATCHDOG,)) + struct.pack("<H", 3000))
     assert event == P.Event.WATCHDOG and int.from_bytes(data, "little") == 3000
+
+
+# ---------------------------------------------------------------- 配置与日志载荷
+def test_cfg_state_layout_matches_firmware():
+    payload = struct.pack("<BBHHHHIH", 1, P.CFG_FLAG_LOADED | P.CFG_FLAG_DIRTY,
+                          200, 3000, 415, 1000, 42, 0)
+    cfg = P.CfgState.parse(payload)
+    assert (cfg.version, cfg.telem_period_ms, cfg.wd_timeout_ms) == (1, 200, 3000)
+    assert (cfg.vout_permille, cfg.ilim_permille, cfg.boot_count) == (415, 1000, 42)
+    assert cfg.loaded and cfg.dirty and not cfg.using_defaults
+
+    with pytest.raises(P.ProtocolError):
+        P.CfgState.parse(payload[:-1])
+
+
+def test_cfg_set_and_log_read_payloads():
+    assert P.cfg_set_payload(P.CfgField.WD_TIMEOUT, 3000) == b"\x02\xb8\x0b"
+    assert P.log_read_payload(0x123, 2) == b"\x23\x01\x00\x00\x02"
+    with pytest.raises(ValueError):
+        P.log_read_payload(0, P.LOG_READ_MAX + 1)
+
+
+def test_log_records_and_info_parse():
+    info = P.LogInfo.parse(struct.pack("<BBHII", 16, 16, 4096, 7, 3))
+    assert (info.rec_size, info.total, info.first_index) == (16, 7, 3)
+    assert info.seg_count * info.seg_size == 4096 * 16
+
+    boot = struct.pack("<IBBBBHHI", 120, P.LogType.BOOT, 0, 1, 0, 0, 0, 5)
+    safe = struct.pack("<IBBBBHHI", 900, P.LogType.SAFE, P.SafeReason.WATCHDOG, 0, 0,
+                       415, 1000, 3000)
+    records = P.parse_log_data(bytes((2,)) + boot + safe)
+    assert len(records) == 2
+    assert "启动序号=5" in records[0].describe()
+    assert "看门狗超时" in records[1].describe()
+
+    # 声称 2 条但只装得下 1 条：拒收，别把尾巴的垃圾当记录
+    with pytest.raises(P.ProtocolError):
+        P.parse_log_data(bytes((2,)) + boot)
+
+
+def test_log_record_describe_uses_info_for_units():
+    info = P.Info.parse(struct.pack("<BBBBHHHHHBB", 1, 0, 1, 7, 23400, 3900, 5040, 4200, 50, 0x40, 0))
+    rec = P.LogRecord.unpack_from(
+        struct.pack("<IBBBBHHI", 10, P.LogType.SAFE, P.SafeReason.LOCAL_KEY, 0, 0, 415, 1000, 0), 0)
+    # 415‰ 按板级常量换算 = 23400 × (1000+5×415) / 6000 = 11992 mV
+    assert "11992mV" in rec.describe(info)
+    assert "415‰" in rec.describe(None)
 
 
 # ---------------------------------------------------------------- 单位换算

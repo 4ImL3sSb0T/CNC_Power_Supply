@@ -29,6 +29,14 @@ typedef enum {
 #define TEST_ITEM_COUNT     7
 #define TEST_DETAIL_LEN     22
 
+/* PCB_TEST_CMD_SAFE 的 arg：回安全态的原因。随快照流给上位机与日志。
+ * 本地长按急停不经链路（按键回调直接投命令），所以原因只能从这里溯源。 */
+typedef enum {
+    TEST_SAFE_REASON_KEY      = 1,  /* 本地按键长按急停 */
+    TEST_SAFE_REASON_HOST     = 2,  /* 上位机 SAFE_STATE */
+    TEST_SAFE_REASON_WATCHDOG = 3,  /* 上位机失联看门狗超时 */
+} test_safe_reason_t;
+
 typedef struct {
     const char *name;
     test_result_t result;
@@ -46,6 +54,8 @@ typedef struct {
     u16 pg_mv;                  /* PG 节点电压（关断态约 2.1V，建立后 3.3V） */
     u16 vout_mv;                /* 外接分压实测，0 = 未启用/未接 */
     bool ce_on;
+    u8 safe_reason;             /* 最近一次回安全态的原因（test_safe_reason_t） */
+    u32 safe_seq;               /* 每次回安全态自增；供链路/日志差分捕捉 */
     test_item_t items[TEST_ITEM_COUNT];
 } test_status_t;
 
@@ -60,7 +70,7 @@ typedef enum {
     PCB_TEST_CMD_MANUAL_STEP,   /* 手动步进电压设定（等效双击） */
     PCB_TEST_CMD_RUN,           /* 跑测试序列（等效单击） */
     PCB_TEST_CMD_STOP,          /* 中止测试序列 */
-    PCB_TEST_CMD_SAFE,          /* 急停回安全态（等效长按，会打断执行中的测试项） */
+    PCB_TEST_CMD_SAFE,          /* 急停回安全态（会打断执行中的测试项）；arg = test_safe_reason_t */
     PCB_TEST_CMD_REMOTE,        /* arg = 0 退出 / 1 进入远程模式 */
 } pcb_test_cmd_op_t;
 

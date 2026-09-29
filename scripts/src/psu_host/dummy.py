@@ -76,6 +76,15 @@ class _SimState:
     telem_period_ms: int = 100
     telem_next: float = 0.0
     items: list[dict] = field(default_factory=list)
+    # 持久化配置：模拟器进程内就是"掉电不丢"的介质。语义与固件一致 ——
+    # 这里存的是预设值，上电不会自动应用到 pwm/ipwm（那要 CFG_RESET/RESTORE）
+    cfg_telem_ms: int = 100
+    cfg_wd_ms: int = 0
+    cfg_vout_permille: int = 0
+    cfg_ilim_permille: int = 0
+    cfg_boot_count: int = 0
+    cfg_flags: int = P.CFG_FLAG_LOADED
+    log: list[bytes] = field(default_factory=list)      # 已落盘的 16 字节记录
 
 
 class DummyTransport(Transport):
@@ -100,7 +109,8 @@ class DummyTransport(Transport):
             ilim_full_ma=ILIM_FULL_MA,
             iin_lim_ma=IIN_LIM_MA,
             pwm_freq_khz=PWM_FREQ_KHZ,
-            caps=P.CAP_WATCHDOG | P.CAP_ITEM_EVENTS | P.CAP_REMOTE | P.CAP_TELEM_PERIOD,
+            caps=(P.CAP_WATCHDOG | P.CAP_ITEM_EVENTS | P.CAP_REMOTE | P.CAP_TELEM_PERIOD
+                  | P.CAP_CFG | P.CAP_STORE),
         )
         self.state = _SimState()
         self.state.wd_last = time.monotonic()
@@ -109,6 +119,9 @@ class DummyTransport(Transport):
             {"result": P.TestResult.PENDING, "elapsed_ms": 0, "detail": ""}
             for _ in range(TEST_ITEM_COUNT)
         ]
+        # 与固件一样：每次上电先落一条 BOOT 记录
+        self.state.cfg_boot_count = 1
+        self._log_append(P.LogType.BOOT, a=0, b=1, arg=self.state.cfg_boot_count)
         self._seq_item = -1
         self._seq_item_started = 0.0
         self._thread = threading.Thread(target=self._tick_loop, name="psu-dummy", daemon=True)
@@ -264,7 +277,7 @@ class DummyTransport(Transport):
                 self._ack(seq, cmd, 0, payload[0])
                 self._text(f"[SET] CE={'ON' if self.state.ce_on else 'OFF'}")
         elif cmd == Cmd.SAFE_STATE:
-            self._safe_state()
+            self._safe_state(P.SafeReason.HOST)
             self._ack(seq, cmd)
         elif cmd == Cmd.RUN_TEST:
             if self.state.run_state == P.RunState.RUNNING:
@@ -305,8 +318,96 @@ class DummyTransport(Transport):
                 )
         elif cmd == Cmd.KEEPALIVE:
             self._ack(seq, cmd)
+        elif cmd == Cmd.CFG_GET:
+            self._cfg_state(seq)
+        elif cmd == Cmd.CFG_SET:
+            self._cfg_set(seq, payload)
+        elif cmd == Cmd.CFG_RESET:
+            state = self.state
+            state.cfg_telem_ms = 100
+            state.cfg_wd_ms = 0
+            state.cfg_vout_permille = 0
+            state.cfg_ilim_permille = 0
+            state.telem_period_ms = 100
+            state.telem_next = time.monotonic() + 0.1
+            self._ack(seq, cmd)
+        elif cmd == Cmd.LOG_INFO:
+            state = self.state
+            self._frame(
+                Rsp.LOGINFO,
+                seq,
+                struct.pack("<BBHII", P.LOG_REC_SIZE, 16, 4096, len(state.log), 0),
+            )
+        elif cmd == Cmd.LOG_READ:
+            self._log_read(seq, payload)
+        elif cmd == Cmd.LOG_CLEAR:
+            self.state.log.clear()
+            self._ack(seq, cmd)
         else:
             self._ack(seq, cmd, -4)                          # EXIT_NOT_SUPPORTED
+
+    # ---------------- 持久化配置 / 日志 ----------------
+    def _cfg_state(self, seq: int) -> None:
+        state = self.state
+        self._frame(
+            Rsp.CFG,
+            seq,
+            struct.pack(
+                "<BBHHHHIH",
+                1,                      # 配置结构版本
+                state.cfg_flags,
+                state.cfg_telem_ms,
+                state.cfg_wd_ms,
+                state.cfg_vout_permille,
+                state.cfg_ilim_permille,
+                state.cfg_boot_count,
+                0,
+            ),
+        )
+
+    def _cfg_set(self, seq: int, payload: bytes) -> None:
+        if len(payload) != 3:
+            self._ack(seq, Cmd.CFG_SET, -3)
+            return
+        field, value = struct.unpack("<BH", payload)
+        state = self.state
+
+        if field == P.CfgField.TELEM_PERIOD:
+            if value != 0 and not (20 <= value <= 1000):
+                self._ack(seq, Cmd.CFG_SET, -3, value)
+                return
+            state.cfg_telem_ms = value
+            state.telem_period_ms = value            # 非安全项：立即生效
+            state.telem_next = time.monotonic() + value / 1000.0
+            self._ack(seq, Cmd.CFG_SET, 0, value)
+        elif field == P.CfgField.WD_TIMEOUT:
+            if value != 0 and not (200 <= value <= 60000):
+                self._ack(seq, Cmd.CFG_SET, -3, value)
+                return
+            state.cfg_wd_ms = value                  # 只记建议值，不武装
+            self._ack(seq, Cmd.CFG_SET, 0, value)
+        elif field in (P.CfgField.VOUT, P.CfgField.ILIM):
+            cmd = Cmd.SET_VOUT if field == P.CfgField.VOUT else Cmd.SET_ILIM
+            permille = self._to_permille(cmd, Unit.MV, value)
+            if permille is None:
+                self._ack(seq, Cmd.CFG_SET, -3, 0)
+                return
+            if field == P.CfgField.VOUT:
+                state.cfg_vout_permille = permille
+            else:
+                state.cfg_ilim_permille = permille
+            self._ack(seq, Cmd.CFG_SET, 0, permille)
+        else:
+            self._ack(seq, Cmd.CFG_SET, -3, 0)
+
+    def _log_read(self, seq: int, payload: bytes) -> None:
+        if len(payload) != 5:
+            self._ack(seq, Cmd.LOG_READ, -3)
+            return
+        index, nrec = struct.unpack("<IB", payload)
+        nrec = min(nrec, P.LOG_READ_MAX)
+        records = self.state.log[index : index + nrec]
+        self._frame(Rsp.LOGDATA, seq, bytes((len(records),)) + b"".join(records))
 
     def _setpoint(self, seq: int, cmd: int, payload: bytes) -> None:
         if len(payload) != 3:
@@ -353,19 +454,31 @@ class DummyTransport(Transport):
     def ilim_setpoint_ma(self) -> int:
         return (ILIM_FULL_MA * self.state.ipwm_permille) // 1000
 
+    # ---------------- 日志（模拟"掉电不丢"的记录） ----------------
+    def _log_append(self, rtype: int, a: int = 0, b: int = 0, pwm: int = 0,
+                    ipwm: int = 0, arg: int = 0) -> None:
+        tick = int((time.monotonic() - self._started) * 1000) & 0xFFFFFFFF
+        self.state.log.append(
+            struct.pack("<IBBBBHHI", tick, rtype, a, b, 0, pwm, ipwm, arg)
+        )
+
     # ---------------- 安全态 / 序列 ----------------
-    def _safe_state(self) -> None:
+    def _safe_state(self, reason: int = P.SafeReason.HOST) -> None:
         state = self.state
         state.ce_on = False
         state.manual = False
+        if state.run_state == P.RunState.RUNNING:
+            self._finish_sequence(P.RunState.ABORTED)
+        # 与固件一致：先记下"触发瞬间的设定值"再清零
+        self._log_append(P.LogType.SAFE, a=reason, pwm=state.pwm_permille,
+                         ipwm=state.ipwm_permille,
+                         arg=state.wd_timeout_ms if reason == P.SafeReason.WATCHDOG else 0)
         state.pwm_permille = 0
         state.ipwm_permille = 0
         if state.remote:
             state.remote = False
             state.wd_timeout_ms = 0
             self._event(P.Event.REMOTE, b"\x00")
-        if state.run_state == P.RunState.RUNNING:
-            self._finish_sequence(P.RunState.ABORTED)
         self._text("[SAFE] 安全态：CE# 关断、PWM 0%、IPWM 0%")
 
     def _start_sequence(self) -> None:
@@ -449,8 +562,9 @@ class DummyTransport(Transport):
 
             if state.wd_timeout_ms and (now - state.wd_last) * 1000.0 > state.wd_timeout_ms:
                 timeout = state.wd_timeout_ms
+                # 先回安全态再清窗口值：日志记录要带上看门狗超时（与固件顺序一致）
+                self._safe_state(P.SafeReason.WATCHDOG)
                 state.wd_timeout_ms = 0
-                self._safe_state()
                 self._event(P.Event.WATCHDOG, struct.pack("<H", timeout))
                 self._text(f"[LINK] 看门狗超时：已回安全态并退出远程")
 

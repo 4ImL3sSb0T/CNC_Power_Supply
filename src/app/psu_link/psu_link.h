@@ -41,6 +41,12 @@
 /* 发送一帧最多等 FIFO 腾出空间的时间（正常情况 FIFO 是空的，等不到） */
 #define PSU_LINK_TX_WAIT_MS         20u
 
+/* 设定值换算：mV/mA → 占空比‰。板级常量（PCB_VOUT_SET_MV 等）只在这两个函数里用，
+ * 上位机不需要知道换算关系。app/syscfg 校验持久化配置的 VOUT/ILIM 字段时复用它们，
+ * 所以这里导出（返回 EXIT_INVALID_PARAM 表示单位或数值越界）。 */
+exit_code_t psu_link_vout_to_permille(u8 unit, u16 val, u16 *out);
+exit_code_t psu_link_ilim_to_permille(u8 unit, u16 val, u16 *out);
+
 /* 复位链路状态。必须在调度器启动前调用一次（不建任务） */
 exit_code_t psu_link_init(void);
 

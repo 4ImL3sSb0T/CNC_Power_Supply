@@ -453,16 +453,22 @@ static void handle_cmd(const pcb_test_cmd_t *cmd)
         break;
 
     case PCB_TEST_CMD_SAFE:
+    {
+        u8 reason = (cmd->arg != 0u) ? (u8)cmd->arg : (u8)TEST_SAFE_REASON_KEY;
+
         pcb_ctrl_safe_state();
         set_manual(0);
         status_lock();
         s_status.remote = 0;
+        s_status.safe_reason = reason;
+        s_status.safe_seq++;
         status_unlock();
         s_remote_mode = 0;              /* 本地急停即退出远程，上位机会收到 EV_REMOTE */
         s_abort = 0;
         refresh_live();
-        printf("[SAFE] 安全态：CE# 关断、PWM 0%%、IPWM 0%%\n");
+        printf("[SAFE] 安全态：CE# 关断、PWM 0%%、IPWM 0%%（原因 %u）\n", (unsigned)reason);
         break;
+    }
 
     case PCB_TEST_CMD_REMOTE:
         s_remote_mode = (cmd->arg != 0u) ? 1u : 0u;
@@ -511,7 +517,7 @@ static void on_key(Button *btn)
         }
         break;
     case BTN_LONG_PRESS_START:
-        (void)pcb_test_post_cmd(PCB_TEST_CMD_SAFE, 0);       /* 急停任何时候都有效 */
+        (void)pcb_test_post_cmd(PCB_TEST_CMD_SAFE, (u16)TEST_SAFE_REASON_KEY);  /* 急停任何时候都有效 */
         break;
     default:
         break;

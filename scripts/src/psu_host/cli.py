@@ -6,6 +6,10 @@
     uv run psu-host --port COM7 set-v 12.35   # 设定 12.35 V（单位 mV 发下去，固件换算）
     uv run psu-host --port COM7 on            # 先应用当前设定再开输出
     uv run psu-host --port COM7 sweep --start 3.9 --stop 23.4 --step 1 --csv sweep.csv
+    uv run psu-host --port COM7 cfg-get       # 读设备上的持久化配置（含启动序号）
+    uv run psu-host --port COM7 cfg-set --telem 200 --vout 12.0
+    uv run psu-host --port COM7 cfg-restore   # 把预设值下发到硬件（CE# 仍关断）
+    uv run psu-host --port COM7 log-dump      # 下载设备记录的事件日志
 """
 
 from __future__ import annotations
@@ -88,6 +92,25 @@ def build_parser() -> argparse.ArgumentParser:
     sweep.add_argument("--dwell", type=float, default=0.5, help="每点停留秒数")
     sweep.add_argument("--ilim", type=float, default=None, help="扫描前先设定限流 A")
     sweep.add_argument("--csv", type=Path, help="把每点读数记到 CSV")
+
+    sub.add_parser("cfg-get", parents=[common], help="读设备上的持久化配置")
+    # 选项名刻意避开全局的 --wd / --telem-ms（argparse 的父解析器不允许重名）
+    cfg_set = sub.add_parser("cfg-set", parents=[common], help="改持久化配置（可同时给多项）")
+    cfg_set.add_argument("--telem-period", type=int, dest="telem_period",
+                         help="遥测周期 ms（0 / 20–1000），改完立即生效")
+    cfg_set.add_argument("--wd-timeout", type=int, dest="wd_timeout",
+                         help="看门狗建议超时 ms（0 / 200–60000），不会自动武装")
+    cfg_set.add_argument("--vout", type=float, help="预设电压 V")
+    cfg_set.add_argument("--ilim", type=float, help="预设限流 A")
+    sub.add_parser("cfg-reset", parents=[common], help="恢复配置默认值（启动序号不重置）")
+    sub.add_parser("cfg-restore", parents=[common],
+                   help="把预设值下发到硬件（设备上电不会自动恢复，要在这里做）")
+
+    sub.add_parser("log-info", parents=[common], help="设备日志的容量与范围")
+    log_dump = sub.add_parser("log-dump", parents=[common], help="下载并打印设备日志")
+    log_dump.add_argument("--since", type=int, help="从第几条开始（缺省从最旧一条起）")
+    log_dump.add_argument("--csv", type=Path, help="同时写成 CSV")
+    sub.add_parser("log-clear", parents=[common], help="清空设备日志")
 
     return parser
 
@@ -326,6 +349,147 @@ def cmd_sweep(args: argparse.Namespace, dev: PsuDevice) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- 持久化配置 / 日志
+def print_cfg(cfg: P.CfgState, info: Info | None) -> None:
+    vout = P.vout_mv_from_permille(cfg.vout_permille, info) if info else None
+    ilim = P.ilim_ma_from_permille(cfg.ilim_permille, info) if info else None
+    print("持久化配置")
+    print(f"  遥测周期(ms)      {cfg.telem_period_ms}   ← 上电自动应用")
+    print(f"  看门狗超时(ms)    {cfg.wd_timeout_ms}   ← 只是 SET_REMOTE 的建议值，上电不武装")
+    print(f"  预设电压          {cfg.vout_permille:>4}‰"
+          + (f"  = {vout / 1000:.3f} V" if vout is not None else ""))
+    print(f"  预设限流          {cfg.ilim_permille:>4}‰"
+          + (f"  = {ilim / 1000:.3f} A" if ilim is not None else ""))
+    print(f"  启动序号          {cfg.boot_count}")
+    marks = []
+    if cfg.using_defaults:
+        marks.append("正在用默认值")
+    if cfg.dirty:
+        marks.append("有改动还没落盘")
+    source = "Flash" if cfg.loaded else "默认值"
+    print(f"  来源              {source}" + (f"（{'，'.join(marks)}）" if marks else ""))
+    print("  说明              预设值上电**不会**自动下发（上电必须停在安全态）；"
+          "要用 cfg-restore 或 set-v/set-ilim")
+
+
+def _wait_cfg_clean(dev: PsuDevice, timeout: float = 1.0) -> P.CfgState:
+    """等异步落盘完成（dirty 位清零）；超时就返回当前状态，交给调用方显示。"""
+    deadline = time.monotonic() + timeout
+    cfg = dev.get_config()
+    while cfg.dirty and time.monotonic() < deadline:
+        time.sleep(0.05)
+        cfg = dev.get_config()
+    return cfg
+
+
+def cmd_cfg_get(_args: argparse.Namespace, dev: PsuDevice) -> int:
+    print_cfg(dev.get_config(), dev.info)
+    return 0
+
+
+def cmd_cfg_set(args: argparse.Namespace, dev: PsuDevice) -> int:
+    info = dev.info
+    assert info is not None
+
+    # 先在本地按同一套范围挡一道：设备侧也会拒，但这里报错更清楚（顺带避免把
+    # 超过 u16 的数字静默截断成另一个合法值）
+    if args.telem_period is not None and args.telem_period != 0 \
+            and not (P.TELEM_PERIOD_MIN <= args.telem_period <= P.TELEM_PERIOD_MAX):
+        raise DeviceError(f"遥测周期要落在 {P.TELEM_PERIOD_MIN}–{P.TELEM_PERIOD_MAX} ms 内（0 = 停止上报）")
+    if args.wd_timeout is not None and args.wd_timeout != 0 \
+            and not (P.WD_TIMEOUT_MIN <= args.wd_timeout <= P.WD_TIMEOUT_MAX):
+        raise DeviceError(f"看门狗超时要落在 {P.WD_TIMEOUT_MIN}–{P.WD_TIMEOUT_MAX} ms 内（0 = 不用）")
+    if args.vout is not None:
+        mv = int(round(args.vout * 1000))
+        if not (info.vout_min_mv <= mv <= info.vout_full_mv):
+            raise DeviceError(f"预设电压要落在 {info.vout_min_mv / 1000:.2f}–"
+                              f"{info.vout_full_mv / 1000:.2f} V 内")
+    if args.ilim is not None:
+        ma = int(round(args.ilim * 1000))
+        if not (0 <= ma <= info.ilim_full_ma):
+            raise DeviceError(f"预设限流要落在 0–{info.ilim_full_ma / 1000:.2f} A 内")
+
+    todo: list[tuple[P.CfgField, int, str]] = []
+    if args.telem_period is not None:
+        todo.append((P.CfgField.TELEM_PERIOD, args.telem_period, f"{args.telem_period} ms"))
+    if args.wd_timeout is not None:
+        todo.append((P.CfgField.WD_TIMEOUT, args.wd_timeout, f"{args.wd_timeout} ms"))
+    if args.vout is not None:
+        todo.append((P.CfgField.VOUT, int(round(args.vout * 1000)), f"{args.vout:.3f} V"))
+    if args.ilim is not None:
+        todo.append((P.CfgField.ILIM, int(round(args.ilim * 1000)), f"{args.ilim:.3f} A"))
+    if not todo:
+        raise DeviceError("至少给一项：--telem-period / --wd-timeout / --vout / --ilim")
+
+    for field, value, text in todo:
+        ack = dev.set_config_field(field, value)
+        tail = f"（生效占空比 {ack.arg}‰）" if field in (P.CfgField.VOUT, P.CfgField.ILIM) else ""
+        print(f"  {P.CFG_FIELD_TEXT[field]} → {text}{tail}")
+
+    cfg = _wait_cfg_clean(dev)
+    if cfg.dirty:
+        print("  警告：设备还没把改动落盘（dirty 位仍为 1），再 cfg-get 看一次")
+    else:
+        print("  已落盘")
+    return 0
+
+
+def cmd_cfg_reset(_args: argparse.Namespace, dev: PsuDevice) -> int:
+    dev.reset_config()
+    print_cfg(_wait_cfg_clean(dev), dev.info)
+    return 0
+
+
+def cmd_cfg_restore(_args: argparse.Namespace, dev: PsuDevice) -> int:
+    cfg = dev.restore_config()
+    print(f"已按预设下发：遥测 {cfg.telem_period_ms} ms，"
+          f"VOUT {cfg.vout_permille}‰，ILIM {cfg.ilim_permille}‰")
+    print("CE# 仍是关断（上电安全态），要开输出再执行 on")
+    return 0
+
+
+def cmd_log_info(_args: argparse.Namespace, dev: PsuDevice) -> int:
+    info = dev.log_info()
+    print("设备日志")
+    print(f"  记录 {info.rec_size} B × {info.total} 条"
+          f"（段 {info.seg_count} × {info.seg_size} B = {info.seg_count * info.seg_size // 1024} KB）")
+    print(f"  最旧一条的编号    {info.first_index}")
+    return 0
+
+
+def cmd_log_dump(args: argparse.Namespace, dev: PsuDevice) -> int:
+    records = dev.read_log(since=args.since)
+    if not records:
+        print("设备上没有日志记录")
+        return 0
+
+    print(f"共 {len(records)} 条")
+    for rec in records:
+        print(f"  {rec.describe(dev.info)}")
+
+    if args.csv:
+        with args.csv.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["tick_ms", "type", "a", "b", "pwm_permille", "ipwm_permille",
+                             "arg", "描述"])
+            for rec in records:
+                writer.writerow([rec.tick_ms, rec.type, rec.a, rec.b, rec.pwm_permille,
+                                 rec.ipwm_permille, rec.arg, rec.describe(dev.info)])
+        print(f"已写入 {args.csv}")
+    return 0
+
+
+def cmd_log_clear(_args: argparse.Namespace, dev: PsuDevice) -> int:
+    dev.clear_log()
+    deadline = time.monotonic() + 1.0
+    info = dev.log_info()
+    while info.total and time.monotonic() < deadline:
+        time.sleep(0.05)
+        info = dev.log_info()
+    print(f"清空完成：当前 {info.total} 条")
+    return 0
+
+
 DISPATCH = {
     "info": cmd_info,
     "monitor": cmd_monitor,
@@ -336,6 +500,13 @@ DISPATCH = {
     "safe": cmd_safe,
     "test": cmd_test,
     "sweep": cmd_sweep,
+    "cfg-get": cmd_cfg_get,
+    "cfg-set": cmd_cfg_set,
+    "cfg-reset": cmd_cfg_reset,
+    "cfg-restore": cmd_cfg_restore,
+    "log-info": cmd_log_info,
+    "log-dump": cmd_log_dump,
+    "log-clear": cmd_log_clear,
 }
 
 

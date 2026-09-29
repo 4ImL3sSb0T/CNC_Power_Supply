@@ -61,6 +61,12 @@ class Cmd(IntEnum):
     SET_REMOTE = 0x0A   # u8 enable, u16 timeout_ms → ACK
     GET_STATUS = 0x0B   # 无                        → STATUS + 若干 ITEM
     KEEPALIVE = 0x0C    # u32 host_ms               → ACK
+    CFG_GET = 0x0D      # 无                        → CFG（16 字节语义字段）
+    CFG_SET = 0x0E      # u8 field, u16 value       → ACK(arg = 生效值)
+    CFG_RESET = 0x0F    # 无                        → ACK（恢复默认值并落盘）
+    LOG_INFO = 0x10     # 无                        → LOGINFO
+    LOG_READ = 0x11     # u32 rec_index, u8 nrec    → LOGDATA（nrec ≤ 2）
+    LOG_CLEAR = 0x12    # 无                        → ACK（清空全部日志段）
 
 
 class Rsp(IntEnum):
@@ -73,6 +79,9 @@ class Rsp(IntEnum):
     EVENT = 0x85        # u8 event + 事件数据
     ITEM = 0x86         # 42 字节测试项状态
     STATUS = 0x8B       # TELEM 16 字节 + u8 item_results[7] + u8 reserved = 24
+    CFG = 0x8C          # 16 字节，见 CfgState
+    LOGINFO = 0x8D      # 12 字节，见 LogInfo
+    LOGDATA = 0x8E      # u8 nrec + nrec × 16 字节记录，见 LogRecord
 
 
 class Unit(IntEnum):
@@ -94,6 +103,8 @@ CAP_ITEM_EVENTS = 0x02
 CAP_VOUT_SENSE = 0x04
 CAP_REMOTE = 0x08
 CAP_TELEM_PERIOD = 0x10
+CAP_CFG = 0x20          # 支持持久化配置（CFG_GET/SET/RESET）
+CAP_STORE = 0x40        # 支持日志持久化（LOG_INFO/READ/CLEAR）
 
 # TELEM.flags 位
 FLAG_CE_ON = 0x01
@@ -113,6 +124,62 @@ class Event(IntEnum):
 class ItemPhase(IntEnum):
     START = 1
     END = 2
+
+
+# ---------------------------------------------------------------- 持久化配置 / 日志
+class CfgField(IntEnum):
+    """CFG_SET 的 field。配置是一份"预设"，不是实时设定值的镜像。"""
+
+    TELEM_PERIOD = 1    # ms，0 或 20–1000；设备侧立即生效
+    WD_TIMEOUT = 2      # ms，0 或 200–60000；设备只当"下次 SET_REMOTE 的建议值"
+    VOUT = 3            # mV；ACK arg 回生效占空比‰
+    ILIM = 4            # mA；ACK arg 回生效占空比‰
+
+
+CFG_FIELD_TEXT = {
+    CfgField.TELEM_PERIOD: "遥测周期(ms)",
+    CfgField.WD_TIMEOUT: "看门狗超时(ms)",
+    CfgField.VOUT: "预设电压(mV)",
+    CfgField.ILIM: "预设限流(mA)",
+}
+
+# 与固件 psu_link.h 的 PSU_LINK_TELEM_PERIOD_MIN/MAX、WD_TIMEOUT_MIN/MAX 一致
+TELEM_PERIOD_MIN = 20
+TELEM_PERIOD_MAX = 1000
+WD_TIMEOUT_MIN = 200
+WD_TIMEOUT_MAX = 60000
+
+# CFG.flags 位
+CFG_FLAG_LOADED = 0x01      # 配置来自设备 Flash（否则是默认值）
+CFG_FLAG_DIRTY = 0x02       # 有改动还没落盘
+CFG_FLAG_DEFAULT = 0x04     # 正在用默认值（无文件，或文件校验不过）
+
+CFG_STATE_LEN = 16
+CFG_VERSION = 1
+
+
+class LogType(IntEnum):
+    """日志记录类型。设备当前只写 BOOT 与 SAFE 两种，其余值留给后续扩展。"""
+
+    SEG = 0             # 段头，设备内部用，不会出现在 LOG_READ 结果里
+    BOOT = 1            # a/b = 固件主/次版本，arg = 启动序号
+    SAFE = 2            # a = 原因，arg = 看门狗超时值(ms)
+
+
+class SafeReason(IntEnum):
+    LOCAL_KEY = 1       # 本地按键长按急停
+    HOST = 2            # 上位机 SAFE_STATE
+    WATCHDOG = 3        # 上位机失联看门狗超时
+
+
+SAFE_REASON_TEXT = {
+    SafeReason.LOCAL_KEY: "本地按键长按",
+    SafeReason.HOST: "上位机急停",
+    SafeReason.WATCHDOG: "看门狗超时",
+}
+
+LOG_REC_SIZE = 16
+LOG_READ_MAX = 2        # 一次 LOG_READ 最多取回两条（设备侧 48 字节 payload 上限）
 
 
 class RunState(IntEnum):
@@ -356,6 +423,8 @@ class Info:
             (CAP_VOUT_SENSE, "VOUT 实测"),
             (CAP_REMOTE, "远程模式"),
             (CAP_TELEM_PERIOD, "遥测周期"),
+            (CAP_CFG, "配置持久化"),
+            (CAP_STORE, "日志持久化"),
         ]
         return " ".join(name for bit, name in bits if self.caps & bit) or "无"
 
@@ -461,6 +530,125 @@ def parse_event(payload: bytes) -> tuple[int, bytes]:
     if not payload:
         raise ProtocolError("EVENT 至少 1 字节")
     return payload[0], payload[1:]
+
+
+@dataclass(frozen=True)
+class CfgState:
+    """CFG（16 字节）：设备上持久化配置的语义视图。
+
+    设备给的是语义字段，不是它自己的落盘布局；这里的 vout/ilim 是**预设值**
+    （占空比‰），上电不会自动应用，要用 `cfg restore` 或 SET_VOUT 下发。
+    """
+
+    version: int
+    flags: int
+    telem_period_ms: int
+    wd_timeout_ms: int
+    vout_permille: int
+    ilim_permille: int
+    boot_count: int
+
+    @classmethod
+    def parse(cls, payload: bytes) -> "CfgState":
+        if len(payload) != CFG_STATE_LEN:
+            raise ProtocolError(f"CFG 应为 {CFG_STATE_LEN} 字节，实为 {len(payload)}")
+        (version, flags, telem, wd, vout, ilim, boot, _res) = struct.unpack(
+            "<BBHHHHIH", payload
+        )
+        return cls(version, flags, telem, wd, vout, ilim, boot)
+
+    @property
+    def loaded(self) -> bool:
+        return bool(self.flags & CFG_FLAG_LOADED)
+
+    @property
+    def dirty(self) -> bool:
+        return bool(self.flags & CFG_FLAG_DIRTY)
+
+    @property
+    def using_defaults(self) -> bool:
+        return bool(self.flags & CFG_FLAG_DEFAULT)
+
+
+@dataclass(frozen=True)
+class LogInfo:
+    """LOGINFO（12 字节）：日志段布局与可读范围。"""
+
+    rec_size: int
+    seg_count: int
+    seg_size: int
+    total: int
+    first_index: int
+
+    @classmethod
+    def parse(cls, payload: bytes) -> "LogInfo":
+        if len(payload) != 12:
+            raise ProtocolError(f"LOGINFO 应为 12 字节，实为 {len(payload)}")
+        rec_size, seg_count, seg_size, total, first_index = struct.unpack("<BBHII", payload)
+        return cls(rec_size, seg_count, seg_size, total, first_index)
+
+
+@dataclass(frozen=True)
+class LogRecord:
+    """一条 16 字节日志记录。"""
+
+    tick_ms: int
+    type: int
+    a: int
+    b: int
+    rsv: int
+    pwm_permille: int
+    ipwm_permille: int
+    arg: int
+
+    @classmethod
+    def unpack_from(cls, buf: bytes, offset: int) -> "LogRecord":
+        if len(buf) - offset < LOG_REC_SIZE:
+            raise ProtocolError("日志记录被截断")
+        (tick, rtype, a, b, rsv, pwm, ipwm, arg) = struct.unpack_from("<IBBBBHHI", buf, offset)
+        return cls(tick, rtype, a, b, rsv, pwm, ipwm, arg)
+
+    def _setpoint_text(self, info: Info | None) -> str:
+        if info is None:
+            return f"设定={self.pwm_permille}‰/{self.ipwm_permille}‰"
+        return (f"设定={vout_mv_from_permille(self.pwm_permille, info)}mV/"
+                f"{ilim_ma_from_permille(self.ipwm_permille, info)}mA")
+
+    def describe(self, info: Info | None = None) -> str:
+        """人读的一行；info 用来把记录里的占空比换算成 mV/mA（没有 INFO 就只显示占空比）。"""
+        when = f"t={self.tick_ms}ms"
+        if self.type == LogType.BOOT:
+            return f"{when} 上电 启动序号={self.arg} 固件={self.a}.{self.b}"
+        if self.type == LogType.SAFE:
+            reason = SAFE_REASON_TEXT.get(self.a, f"原因{self.a}")
+            extra = f" 看门狗超时={self.arg}ms" if self.a == SafeReason.WATCHDOG else ""
+            return f"{when} 回安全态 {reason} {self._setpoint_text(info)}{extra}"
+        return (f"{when} 类型{self.type} a={self.a} b={self.b} arg={self.arg} "
+                f"{self._setpoint_text(info)}")
+
+
+def cfg_set_payload(field: CfgField | int, value: int) -> bytes:
+    """CFG_SET 的 payload：u8 field + u16 value。"""
+    return struct.pack("<BH", int(field), value & 0xFFFF)
+
+
+def log_read_payload(rec_index: int, nrec: int) -> bytes:
+    """LOG_READ 的 payload：u32 rec_index + u8 nrec。"""
+    if not 1 <= nrec <= LOG_READ_MAX:
+        raise ValueError(f"nrec 应在 [1, {LOG_READ_MAX}] 内，实为 {nrec}")
+    return struct.pack("<IB", rec_index, nrec)
+
+
+def parse_log_data(payload: bytes) -> list[LogRecord]:
+    """LOGDATA → 记录列表（设备按 16 字节对齐返回，不足一条的尾巴直接丢弃）。"""
+    if not payload:
+        raise ProtocolError("LOGDATA 至少 1 字节")
+    nrec = payload[0]
+    body = payload[1:]
+    usable = len(body) // LOG_REC_SIZE
+    if usable < nrec:
+        raise ProtocolError(f"LOGDATA 声称 {nrec} 条，实际只装得下 {usable} 条")
+    return [LogRecord.unpack_from(body, i * LOG_REC_SIZE) for i in range(nrec)]
 
 
 def parse_status_items(payload: bytes, item_count: int) -> tuple[Telemetry, list[int]]:

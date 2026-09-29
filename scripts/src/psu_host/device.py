@@ -249,6 +249,93 @@ class PsuDevice:
         """拉一次完整快照（含 7 项测试结果），结果通过回调派发。"""
         self.request(Cmd.GET_STATUS, expect={Rsp.STATUS}, **kw)
 
+    # ---------------- 持久化配置与日志 ----------------
+    def get_config(self, **kw: Any) -> P.CfgState:
+        """读设备上的持久化配置（含启动序号与三种标志位）。
+
+        设备还没挂载完文件系统时会回 ACK(EXIT_BUSY)，这里抛 CommandRejected。
+        """
+        frame = self.request(Cmd.CFG_GET, expect={Rsp.CFG, Rsp.ACK}, **kw)
+        if frame.cmd == Rsp.ACK:
+            raise CommandRejected(Cmd.CFG_GET, Ack.parse(frame.payload))
+        return P.CfgState.parse(frame.payload)
+
+    def set_config_field(self, field: P.CfgField, value: int, **kw: Any) -> Ack:
+        """改一项持久化配置，ACK.arg 是生效值（VOUT/ILIM 回换算后的占空比‰）。
+
+        设备是异步落盘的：ACK 只表示"已受理"，要确认写进去了就再 get_config()
+        看 dirty 位有没有清零。
+        """
+        return self.command(Cmd.CFG_SET, P.cfg_set_payload(field, value), **kw)
+
+    def reset_config(self, **kw: Any) -> Ack:
+        """恢复设备配置的默认值（启动序号是计数器，不重置）。"""
+        return self.command(Cmd.CFG_RESET, **kw)
+
+    def log_info(self, **kw: Any) -> P.LogInfo:
+        """日志容量与可读范围：total 条记录，最旧的一条编号是 first_index。"""
+        frame = self.request(Cmd.LOG_INFO, expect={Rsp.LOGINFO, Rsp.ACK}, **kw)
+        if frame.cmd == Rsp.ACK:
+            raise CommandRejected(Cmd.LOG_INFO, Ack.parse(frame.payload))
+        return P.LogInfo.parse(frame.payload)
+
+    def read_log(
+        self,
+        since: int | None = None,
+        on_chunk: Callable[[int, list[P.LogRecord]], None] | None = None,
+        timeout: float = 0.6,
+        retries: int = 3,
+    ) -> list[P.LogRecord]:
+        """把设备上的日志全拉下来，按记录号两条一批直到设备回 0 条。
+
+        since 缺省时从 LogInfo.first_index 起（环形覆盖后它不是 0）。
+        超时放宽到 0.6s：设备侧一次 4KB 扇区擦除会让两个核都关中断 ~45ms
+        （最坏 400ms），这期间 CDC 不响应，用默认的 250ms 会把正常读判成丢包。
+        """
+        info = self.log_info(timeout=timeout, retries=retries)
+        index = info.first_index if since is None else since
+        records: list[P.LogRecord] = []
+
+        while True:
+            frame = self.request(
+                Cmd.LOG_READ,
+                P.log_read_payload(index, P.LOG_READ_MAX),
+                expect={Rsp.LOGDATA, Rsp.ACK},
+                timeout=timeout,
+                retries=retries,
+            )
+            if frame.cmd == Rsp.ACK:
+                raise CommandRejected(Cmd.LOG_READ, Ack.parse(frame.payload))
+
+            chunk = P.parse_log_data(frame.payload)
+            if not chunk:
+                break                       # 设备说到末尾了
+            records.extend(chunk)
+            if on_chunk is not None:
+                on_chunk(index, chunk)
+            index += len(chunk)
+
+        return records
+
+    def clear_log(self, **kw: Any) -> Ack:
+        """清空设备上的全部日志段（记录号从 0 重新开始）。"""
+        return self.command(Cmd.LOG_CLEAR, **kw)
+
+    def restore_config(self, **kw: Any) -> P.CfgState:
+        """把设备里的预设值下发到硬件，返回下发前的配置。
+
+        设备上电**不会**自动恢复设定值（上电必须停在安全态），所以"恢复上次配置"
+        由上位机做：读配置 → SET_TELEM → SET_VOUT/SET_ILIM（用原始占空比，
+        不依赖 INFO 的换算）。CE# 保持关断，要开输出得显式 set_output(True)。
+        """
+        cfg = self.get_config(**kw)
+        self.set_telem_period(cfg.telem_period_ms, **kw)
+        if cfg.vout_permille:
+            self.set_vout(cfg.vout_permille, unit=Unit.PERMILLE, **kw)
+        if cfg.ilim_permille:
+            self.set_ilim(cfg.ilim_permille, unit=Unit.PERMILLE, **kw)
+        return cfg
+
     def arm_watchdog(self, timeout_ms: int = 3000, keepalive_ms: int | None = None) -> None:
         """进远程模式 + 武装看门狗 + 起 keepalive 线程（默认周期是超时的 1/3）。"""
         self.set_remote(True, timeout_ms)
@@ -323,7 +410,8 @@ class PsuDevice:
             elif frame.cmd == Rsp.ACK and waiter is None:
                 ack = Ack.parse(frame.payload)
                 self._log(f"设备主动 ACK：{P.exit_code_text(ack.code)}")
-            elif frame.cmd not in (Rsp.ACK, Rsp.PONG, Rsp.INFO):
+            elif frame.cmd not in (Rsp.ACK, Rsp.PONG, Rsp.INFO, Rsp.CFG, Rsp.LOGINFO,
+                                   Rsp.LOGDATA):
                 self._log(f"未知响应 {frame.cmd:#04x}（{len(frame.payload)} 字节）")
         except ProtocolError as exc:
             self._log(f"响应解析失败：{exc}")

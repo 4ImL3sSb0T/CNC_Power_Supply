@@ -155,3 +155,120 @@ def test_unsupported_command_is_reported(session):
     device, _events = session
     with pytest.raises(DeviceError):
         device.command(0x7F, b"")                    # 不存在的命令字 → EXIT_NOT_SUPPORTED
+
+
+# ---------------------------------------------------------------- 持久化配置
+def test_config_round_trip_covers_all_fields(session):
+    device, _events = session
+    assert device.info is not None
+    assert device.info.caps & P.CAP_CFG and device.info.caps & P.CAP_STORE
+
+    assert device.get_config().boot_count >= 1       # 上电就落过一条 BOOT 记录
+
+    assert device.set_config_field(P.CfgField.TELEM_PERIOD, 200).arg == 200
+    assert device.set_config_field(P.CfgField.WD_TIMEOUT, 2500).arg == 2500
+    ack = device.set_config_field(P.CfgField.VOUT, 12350)
+    # ACK 回的是换算后的占空比‰：1200×12350 − 200×23400 再除以 23400 = 433
+    assert ack.arg == 433
+
+    cfg = device.get_config()
+    assert cfg.telem_period_ms == 200 and cfg.wd_timeout_ms == 2500
+    assert cfg.vout_permille == ack.arg
+    assert cfg.loaded and not cfg.using_defaults
+
+    # 异步落盘：dirty 位最终要清零
+    assert wait_for(lambda: not device.get_config().dirty)
+
+    # 遥测周期是唯一会自动应用的非安全项，设备侧真换了
+    simulator = device.link.transport
+    assert simulator.state.telem_period_ms == 200
+    assert simulator.state.cfg_ilim_permille == 0
+
+
+def test_config_rejects_bad_field_or_range(session):
+    device, _events = session
+    for field, value in ((P.CfgField.TELEM_PERIOD, 5),
+                         (P.CfgField.WD_TIMEOUT, 61000),
+                         (P.CfgField.VOUT, 25000),       # 超出 3.9–23.4 V
+                         (99, 1)):                       # 未知字段
+        with pytest.raises(CommandRejected):
+            device.set_config_field(field, value)
+
+
+def test_config_changes_do_not_touch_hardware(session):
+    """预设 ≠ 实时设定值：改配置不该动 PWM/CE#（上电必须停在安全态）。"""
+    device, _events = session
+    device.set_config_field(P.CfgField.VOUT, 12350)
+    device.set_config_field(P.CfgField.ILIM, 3000)
+
+    simulator = device.link.transport
+    assert simulator.state.pwm_permille == 0
+    assert simulator.state.ipwm_permille == 0
+    assert simulator.state.ce_on is False
+
+
+def test_config_reset_keeps_boot_count(session):
+    device, _events = session
+    device.set_config_field(P.CfgField.VOUT, 12350)
+    before = device.get_config().boot_count
+
+    device.reset_config()
+    cfg = device.get_config()
+    assert cfg.vout_permille == 0
+    assert cfg.telem_period_ms == 100                  # 回到默认周期
+    assert cfg.boot_count == before
+
+
+def test_restore_config_applies_presets_but_leaves_output_off(session):
+    device, _events = session
+    device.set_config_field(P.CfgField.VOUT, 12350)
+    device.set_config_field(P.CfgField.ILIM, 3000)
+
+    cfg = device.restore_config()
+    assert cfg.vout_permille > 0 and cfg.ilim_permille > 0
+
+    simulator = device.link.transport
+    assert simulator.state.pwm_permille == cfg.vout_permille
+    assert simulator.state.ipwm_permille == cfg.ilim_permille
+    assert simulator.state.ce_on is False            # 恢复预设不等于开输出
+
+
+# ---------------------------------------------------------------- 日志
+def test_log_starts_with_boot_record(session):
+    device, _events = session
+    info = device.log_info()
+    assert info.rec_size == P.LOG_REC_SIZE
+    assert info.total >= 1
+
+    records = device.read_log()
+    assert records[0].type == P.LogType.BOOT
+    assert records[0].arg >= 1                       # 启动序号
+    assert "启动序号" in records[0].describe()
+
+
+def test_log_records_host_and_watchdog_safe_events(session):
+    device, events = session
+    baseline = len(device.read_log())
+
+    device.set_output(True)
+    device.safe_state()                              # 原因：上位机急停
+    assert wait_for(lambda: len(device.read_log()) >= baseline + 1)
+
+    device.set_output(True)
+    device.set_remote(True, 400)                     # 武装 400ms 看门狗，不起 keepalive
+    assert wait_for(lambda: any(event == P.Event.WATCHDOG for event, _ in events), timeout=2.0)
+
+    records = device.read_log()
+    safe = [record for record in records if record.type == P.LogType.SAFE]
+    assert [record.a for record in safe] == [P.SafeReason.HOST, P.SafeReason.WATCHDOG]
+    assert safe[1].arg == 400                        # 看门狗那条带上窗口值
+    assert "看门狗超时" in safe[1].describe()
+
+
+def test_log_clear_empties_device(session):
+    device, _events = session
+    assert device.log_info().total >= 1
+
+    device.clear_log()
+    assert wait_for(lambda: device.log_info().total == 0)
+    assert device.read_log() == []

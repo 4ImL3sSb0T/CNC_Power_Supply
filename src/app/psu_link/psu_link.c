@@ -30,9 +30,11 @@
 #include "task.h"
 
 #include "app/pcb_test/pcb_test.h"
+#include "app/syscfg/syscfg.h"
 #include "bsp/power/pcb_ctrl.h"
 #include "config/board_config.h"
 #include "lib/proto/psu_proto.h"
+#include "service/pstore/pstore.h"
 
 /* ---------------- 链路状态（只在 link 任务里读写） ---------------- */
 
@@ -44,9 +46,13 @@ static u32 s_telem_next_ms;
 
 static u32 s_wd_timeout_ms;                 /* 0 = 未武装 */
 static u32 s_wd_last_ms;                    /* 最近一次收到主机有效帧的时刻 */
+static u32 s_wd_fired_ms;                   /* 最近一次看门狗超时的窗口值，写日志用 */
 
 static test_status_t s_prev;                /* 上一次轮询到的快照，用于差分出事件 */
 static u8 s_prev_valid;
+
+/* 主机是否显式设过遥测周期：设过就不再拿持久化配置里的默认值去覆盖它 */
+static u8 s_telem_from_host;
 
 /* ---------------- 工具 ---------------- */
 
@@ -151,6 +157,11 @@ static void send_info(u8 seq)
     if (PCB_TEST_VOUT_SENSE_ENABLE) {
         caps |= PSU_CAP_VOUT_SENSE;
     }
+    /* 能力位跟着实际可用性走：文件系统没挂上就不宣称支持持久化，
+     * 上位机据此干净地回落成纯 RAM 行为，而不是每条命令收一个错误码 */
+    if (pstore_ready()) {
+        caps |= PSU_CAP_CFG | PSU_CAP_STORE;
+    }
 
     p[0] = (u8)PSU_PROTO_VERSION;
     p[1] = (u8)PSU_LINK_FW_MAJOR;
@@ -252,6 +263,97 @@ static void send_event(u8 event, const u8 *data, u8 len)
     (void)link_send(PSU_RSP_EVENT, 0, p, (u8)(1u + len));
 }
 
+/* ---------------- 持久化配置 / 日志 ---------------- */
+
+/* 配置：给上位机的是语义字段，不是设备上的落盘布局 */
+static void send_cfg(u8 seq)
+{
+    syscfg_t cfg;
+    u8 flags = 0u;
+    u8 p[16];
+
+    if (syscfg_get(&cfg, &flags) != EXIT_OK) {
+        send_ack(seq, (u8)PSU_CMD_CFG_GET, EXIT_BUSY, 0);
+        return;
+    }
+
+    p[0] = 1u;                          /* 配置结构版本 */
+    p[1] = flags;
+    psu_put_u16(&p[2], cfg.telem_period_ms);
+    psu_put_u16(&p[4], cfg.wd_timeout_ms);
+    psu_put_u16(&p[6], cfg.vout_permille);
+    psu_put_u16(&p[8], cfg.ilim_permille);
+    psu_put_u32(&p[10], cfg.boot_count);
+    psu_put_u16(&p[14], 0u);            /* reserved */
+    (void)link_send(PSU_RSP_CFG, seq, p, sizeof(p));
+}
+
+static void handle_cfg_set(u8 seq, const psu_frame_t *f)
+{
+    u16 effected = 0u;
+    exit_code_t rc;
+
+    if (f->len != 3u) {
+        send_ack(seq, (u8)PSU_CMD_CFG_SET, EXIT_INVALID_PARAM, 0);
+        return;
+    }
+
+    rc = syscfg_set_field(f->payload[0], psu_get_u16(&f->payload[1]), &effected);
+    if (rc == EXIT_OK && f->payload[0] == (u8)PSU_CFG_F_TELEM_PERIOD) {
+        /* 遥测周期是非安全项：改完立即生效，等效 SET_TELEM */
+        s_telem_period_ms = effected;
+        s_telem_next_ms = now_ms() + effected;
+        s_telem_from_host = 1u;
+    }
+    /* 落盘是异步的：这里只是"已受理"，CFG.flags 的 DIRTY 位清零才算真写进去 */
+    send_ack(seq, (u8)PSU_CMD_CFG_SET, rc, effected);
+}
+
+static void send_log_info(u8 seq)
+{
+    pstore_info_t info;
+    u8 p[12];
+
+    if (pstore_log_info(&info) != EXIT_OK) {
+        send_ack(seq, (u8)PSU_CMD_LOG_INFO, EXIT_NOT_SUPPORTED, 0);
+        return;
+    }
+
+    p[0] = info.rec_size;
+    p[1] = info.seg_count;
+    psu_put_u16(&p[2], info.seg_size);
+    psu_put_u32(&p[4], info.total);
+    psu_put_u32(&p[8], info.first_index);
+    (void)link_send(PSU_RSP_LOGINFO, seq, p, sizeof(p));
+}
+
+/* 一次最多取两条（48 字节 payload 上限）。返回 0 条表示已经读到末尾 */
+static void send_log_read(u8 seq, const psu_frame_t *f)
+{
+    pstore_rec_t rec[PSU_LOG_READ_MAX];
+    u8 got = 0u;
+    u8 p[1u + PSU_LOG_READ_MAX * PSU_LOG_REC_SIZE];
+    exit_code_t rc;
+    u8 i;
+
+    if (f->len != 5u) {
+        send_ack(seq, (u8)PSU_CMD_LOG_READ, EXIT_INVALID_PARAM, 0);
+        return;
+    }
+
+    rc = pstore_log_read(psu_get_u32(&f->payload[0]), f->payload[4], rec, &got);
+    if (rc != EXIT_OK) {
+        send_ack(seq, (u8)PSU_CMD_LOG_READ, rc, 0);
+        return;
+    }
+
+    p[0] = got;
+    for (i = 0u; i < got; i++) {
+        pstore_rec_pack(&rec[i], &p[1u + (u32)i * PSU_LOG_REC_SIZE]);
+    }
+    (void)link_send(PSU_RSP_LOGDATA, seq, p, (u8)(1u + (u32)got * PSU_LOG_REC_SIZE));
+}
+
 /* ---------------- 快照差分 → 事件/测试项上报 ---------------- */
 
 static void poll_snapshot(void)
@@ -284,6 +386,20 @@ static void poll_snapshot(void)
             }
         }
 
+        /* 回安全态的差分。本地长按、主机急停、看门狗超时三条路都会让 safe_seq 自增，
+         * 原因随快照带出来 —— 所以连完全不经链路的那条（本地长按）也能记进日志 */
+        if (snap.safe_seq != s_prev.safe_seq) {
+            pstore_rec_t rec;
+
+            pstore_rec_init(&rec, (u8)PSTORE_REC_SAFE);
+            rec.a = snap.safe_reason;
+            rec.pwm_permille = snap.pwm_permille;
+            rec.ipwm_permille = snap.ipwm_permille;
+            rec.arg = (snap.safe_reason == (u8)TEST_SAFE_REASON_WATCHDOG) ? s_wd_fired_ms : 0u;
+            (void)pstore_log_append(&rec);
+            printf("[LINK] 已记录回安全态事件（原因 %u）\n", (unsigned)snap.safe_reason);
+        }
+
         for (i = 0; i < TEST_ITEM_COUNT; i++) {
             if (snap.items[i].result != s_prev.items[i].result ||
                 strncmp(snap.items[i].detail, s_prev.items[i].detail, TEST_DETAIL_LEN) != 0) {
@@ -311,8 +427,11 @@ static void wd_check(void)
         return;
     }
 
-    /* 主机失联：走与本地长按急停同一条通路（CE# 关断 + 双 PWM 0%，序列一并中止） */
-    (void)pcb_test_post_cmd(PCB_TEST_CMD_SAFE, 0);
+    /* 主机失联：走与本地长按急停同一条通路（CE# 关断 + 双 PWM 0%，序列一并中止）。
+     * 原因码随 SAFE 命令进快照，日志由 poll_snapshot 的差分统一记，
+     * 这里只把窗口值留给那条记录用 */
+    s_wd_fired_ms = s_wd_timeout_ms;
+    (void)pcb_test_post_cmd(PCB_TEST_CMD_SAFE, (u16)TEST_SAFE_REASON_WATCHDOG);
     psu_put_u16(d, (u16)s_wd_timeout_ms);
     s_wd_timeout_ms = 0u;
     send_event(PSU_EV_WATCHDOG, d, sizeof(d));
@@ -321,8 +440,9 @@ static void wd_check(void)
 
 /* ---------------- 命令分派 ---------------- */
 
-/* 设定值换算：mV/mA → 占空比‰。板级常量只在这里用一次，上位机不需要知道 */
-static exit_code_t vout_to_permille(u8 unit, u16 val, u16 *out)
+/* 设定值换算：mV/mA → 占空比‰。板级常量只在这里用一次，上位机不需要知道。
+ * app/syscfg 校验持久化配置的 VOUT/ILIM 字段时复用，所以导出（见 psu_link.h） */
+exit_code_t psu_link_vout_to_permille(u8 unit, u16 val, u16 *out)
 {
     u32 num;
 
@@ -345,7 +465,7 @@ static exit_code_t vout_to_permille(u8 unit, u16 val, u16 *out)
     return EXIT_OK;
 }
 
-static exit_code_t ilim_to_permille(u8 unit, u16 val, u16 *out)
+exit_code_t psu_link_ilim_to_permille(u8 unit, u16 val, u16 *out)
 {
     if (unit == (u8)PSU_UNIT_PERMILLE) {
         if (val > 1000u) {
@@ -379,8 +499,8 @@ static void apply_setpoint(u8 seq, u8 cmd, const psu_frame_t *req)
     unit = req->payload[0];
     val = psu_get_u16(&req->payload[1]);
 
-    rc = (cmd == (u8)PSU_CMD_SET_VOUT) ? vout_to_permille(unit, val, &permille)
-                                       : ilim_to_permille(unit, val, &permille);
+    rc = (cmd == (u8)PSU_CMD_SET_VOUT) ? psu_link_vout_to_permille(unit, val, &permille)
+                                       : psu_link_ilim_to_permille(unit, val, &permille);
     if (rc != EXIT_OK) {
         send_ack(seq, cmd, rc, 0);
         return;
@@ -391,6 +511,11 @@ static void apply_setpoint(u8 seq, u8 cmd, const psu_frame_t *req)
     }
     rc = pcb_test_post_cmd((cmd == (u8)PSU_CMD_SET_VOUT) ? PCB_TEST_CMD_SET_VOUT : PCB_TEST_CMD_SET_ILIM,
                            permille);
+    if (rc == EXIT_OK) {
+        /* 预设值跟着设定值走（去抖落盘），这样 `cfg restore` 回填的确实是上次用的值 */
+        syscfg_note_setpoint((cmd == (u8)PSU_CMD_SET_VOUT) ? (u8)PSU_CFG_F_VOUT
+                                                          : (u8)PSU_CFG_F_ILIM, permille);
+    }
     send_ack(seq, cmd, rc, permille);
 }
 
@@ -445,7 +570,7 @@ static void handle_frame(const psu_frame_t *f)
         break;
 
     case PSU_CMD_SAFE_STATE:
-        rc = pcb_test_post_cmd(PCB_TEST_CMD_SAFE, 0);
+        rc = pcb_test_post_cmd(PCB_TEST_CMD_SAFE, (u16)TEST_SAFE_REASON_HOST);
         send_ack(f->seq, f->cmd, rc, 0);
         break;
 
@@ -463,6 +588,37 @@ static void handle_frame(const psu_frame_t *f)
         send_ack(f->seq, f->cmd, rc, 0);
         break;
 
+    case PSU_CMD_CFG_GET:
+        send_cfg(f->seq);
+        break;
+
+    case PSU_CMD_CFG_SET:
+        handle_cfg_set(f->seq, f);
+        break;
+
+    case PSU_CMD_CFG_RESET:
+        rc = syscfg_reset();
+        if (rc == EXIT_OK) {
+            /* 恢复出厂后运行参数也跟着回默认值（只有遥测周期是可自动应用的） */
+            s_telem_period_ms = PSU_LINK_TELEM_PERIOD_MS;
+            s_telem_next_ms = now_ms() + s_telem_period_ms;
+        }
+        send_ack(f->seq, f->cmd, rc, 0);
+        break;
+
+    case PSU_CMD_LOG_INFO:
+        send_log_info(f->seq);
+        break;
+
+    case PSU_CMD_LOG_READ:
+        send_log_read(f->seq, f);
+        break;
+
+    case PSU_CMD_LOG_CLEAR:
+        rc = pstore_log_clear();
+        send_ack(f->seq, f->cmd, rc, 0);
+        break;
+
     case PSU_CMD_SET_TELEM:
         if (f->len != 2u) {
             send_ack(f->seq, f->cmd, EXIT_INVALID_PARAM, 0);
@@ -477,6 +633,7 @@ static void handle_frame(const psu_frame_t *f)
             }
             s_telem_period_ms = period;
             s_telem_next_ms = now_ms() + period;
+            s_telem_from_host = 1u;
             send_ack(f->seq, f->cmd, EXIT_OK, period);
         }
         break;
@@ -585,6 +742,26 @@ static void telemetry_check(void)
 
 /* ---------------- 对外接口 ---------------- */
 
+/* 幂等：配置第一次就绪时把"可自动应用"的那部分套上。
+ * 只套用非安全项（遥测周期）：电压/限流预设与输出开关留在安全态，
+ * 由主机显式下发（CLI 的 `cfg restore`），这样上电永远是安全态。
+ * 主机要是自己设过遥测周期，就不再拿默认值覆盖它。 */
+static void apply_persisted_cfg(void)
+{
+    syscfg_t cfg;
+    u8 flags;
+
+    if (!syscfg_ensure_loaded()) {      /* 加载完成之前一直返回 false */
+        return;
+    }
+    if (syscfg_get(&cfg, &flags) != EXIT_OK || s_telem_from_host) {
+        return;
+    }
+
+    s_telem_period_ms = cfg.telem_period_ms;
+    s_telem_next_ms = now_ms() + cfg.telem_period_ms;
+}
+
 exit_code_t psu_link_init(void)
 {
     rx_reset();
@@ -592,7 +769,9 @@ exit_code_t psu_link_init(void)
     s_telem_next_ms = now_ms() + s_telem_period_ms;
     s_wd_timeout_ms = 0u;
     s_wd_last_ms = now_ms();
+    s_wd_fired_ms = 0u;
     s_prev_valid = 0u;
+    s_telem_from_host = 0u;
     memset(&s_prev, 0, sizeof(s_prev));
     return EXIT_OK;
 }
@@ -602,10 +781,12 @@ void psu_link_task(void *pvParameters)
     (void)pvParameters;
 
     for (;;) {
-        rx_poll();          /* 收命令 */
-        poll_snapshot();    /* 快照差分 → 事件/测试项上报 */
-        wd_check();         /* 主机失联看门狗 */
-        telemetry_check();  /* 周期遥测 */
+        apply_persisted_cfg();  /* 配置就绪后套用一次（幂等） */
+        syscfg_tick();          /* 设定值改动的去抖落盘 */
+        rx_poll();              /* 收命令 */
+        poll_snapshot();        /* 快照差分 → 事件/测试项上报/安全态日志 */
+        wd_check();             /* 主机失联看门狗 */
+        telemetry_check();      /* 周期遥测 */
         vTaskDelay(pdMS_TO_TICKS(PSU_LINK_POLL_MS));
     }
 }

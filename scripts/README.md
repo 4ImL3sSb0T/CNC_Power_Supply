@@ -35,6 +35,11 @@ uv run psu-host --port COM7 monitor --csv log.csv
 | `safe` | 急停：CE# 关断 + 双 PWM 0%（设备同时退出远程模式） |
 | `test [--watch]` | 跑 PCB 测试序列，`--watch` 跟着打印每一步 |
 | `sweep --start 3.9 --stop 23.4 --step 1 --dwell 0.5 [--csv 文件]` | 电压扫描（万用表逐点核对用） |
+| `cfg-get` / `cfg-set --telem-period 200 --vout 12` / `cfg-reset` | 读/改/复位设备上的持久化配置 |
+| `cfg-restore` | 把配置里的预设值下发到硬件（不会开输出） |
+| `log-info` / `log-dump [--since N] [--csv 文件]` / `log-clear` | 设备事件日志：看容量 / 下载 / 清空 |
+
+还有 `--dummy` 不需要硬件；配置与日志命令在模拟器上同样可用。
 
 通用选项：`--port/-p`、`--dummy`、`--wd MS`（看门狗超时，默认 3000，`0` = 不武装）、
 `--telem-ms MS`（遥测周期，默认 100）、`--no-remote`、`--no-safe`（退出时不急停）、`-v`。
@@ -101,6 +106,12 @@ uv run python -m psu_host.gui
 | 0x0A | SET_REMOTE | u8 enable, u16 timeout_ms | ACK |
 | 0x0B | GET_STATUS | — | STATUS + 若干 ITEM |
 | 0x0C | KEEPALIVE | u32 host_ms | ACK |
+| 0x0D | CFG_GET | — | CFG（16 字节语义字段） |
+| 0x0E | CFG_SET | u8 field, u16 value | ACK（arg = 生效值） |
+| 0x0F | CFG_RESET | — | ACK（恢复默认值并落盘） |
+| 0x10 | LOG_INFO | — | LOGINFO |
+| 0x11 | LOG_READ | u32 rec_index, u8 nrec | LOGDATA（nrec ≤ 2） |
+| 0x12 | LOG_CLEAR | — | ACK（清空全部日志段） |
 
 `unit`：`0` = 原始占空比 ‰（0–1000，精确扫描用），`1` = SET_VOUT 用 mV、SET_ILIM 用 mA。
 **mV/mA → ‰ 的换算在固件侧做**（用 `board_config.h` 的常量），越界返回
@@ -117,6 +128,9 @@ uv run python -m psu_host.gui
 | 0x85 | EVENT | u8 event + 事件数据 |
 | 0x86 | ITEM | u8 phase, u8 index, u8 result, u8 reserved, u32 elapsed_ms, char name[12], char detail[22] |
 | 0x8B | STATUS | TELEM 的 16 字节 + u8 item_results[7] + u8 reserved |
+| 0x8C | CFG | u8 version, u8 flags, u16 telem_period_ms, u16 wd_timeout_ms, u16 vout_permille, u16 ilim_permille, u32 boot_count, u16 reserved |
+| 0x8D | LOGINFO | u8 rec_size, u8 seg_count, u16 seg_size, u32 total, u32 first_index |
+| 0x8E | LOGDATA | u8 nrec_returned, 之后 nrec_returned × 16 字节日志记录（最多 2 条） |
 
 TELEM（16 字节）：
 
@@ -151,6 +165,47 @@ EVENT：`0x01 TEST_START`（u8 项数）、`0x02 TEST_END`（u8 run_state）、
 - 测试序列运行中：`SET_VOUT` / `SET_ILIM` / `SET_OUTPUT` / `RUN_TEST` 返回 `EXIT_BUSY`
 - 急停 `SAFE_STATE` 与 `STOP_TEST` 任何时候都被接受（会打断正在执行的测试项）
 - 未知命令返回 `EXIT_NOT_SUPPORTED`；参数越界返回 `EXIT_INVALID_PARAM`
+
+### 持久化配置与日志
+
+设备把配置与事件日志存在板载 Flash 尾部的 256 KB littlefs 分区里（见固件
+`src/service/pstore/`）。INFO.caps 的 **bit5（CFG）** 与 **bit6（STORE）** 表示这两项可用；
+文件系统挂载失败时设备不宣称支持，上位机应据此回落成纯 RAM 行为。
+
+| 命令 | 作用 |
+| --- | --- |
+| `cfg-get` | 读配置：遥测周期、看门狗建议超时、预设电压/限流、启动序号、来源标志 |
+| `cfg-set [--telem-period MS] [--wd-timeout MS] [--vout V] [--ilim A]` | 改配置（可同时给多项） |
+| `cfg-reset` | 恢复默认值（启动序号是计数器，不重置） |
+| `cfg-restore` | **把预设值下发到硬件**，见下面的说明 |
+| `log-info` | 日志容量与可读范围（记录大小、段数、总条数、最旧编号） |
+| `log-dump [--since N] [--csv 文件]` | 下载并打印日志（可存 CSV） |
+| `log-clear` | 清空全部日志段（记录号从 0 重新开始） |
+
+三条容易踩的语义：
+
+1. **配置是"预设"，不是实时值的镜像，设备上电也不会自动应用**。
+   上电第一原则是安全态（CE# 关断 + 双 PWM 0%，SC8701 的 `/CE` 悬空即使能），
+   所以只有**遥测周期**会自动应用；预设电压/限流只回显给上位机，要用
+   `cfg-restore`（或 `set-v`/`set-ilim`）显式下发。`cfg-restore` **也不会开输出**。
+2. **改配置是异步落盘的**：`CFG_SET` 的 ACK 只表示"已受理"，`cfg-get` 的
+   `dirty` 位清零才算真写进 Flash（`cfg-set` 会自己等到清零）。看门狗超时同理
+   只作为"下次 `SET_REMOTE` 的建议值"，**不会被自动武装**（否则主机还没连上就先超时一次）。
+3. **日志的线段式结构**：16 段 × 4 KB，每段 1 条段头 + 255 条 16 字节记录
+   = 4080 条，写满环绕覆盖最旧的段。`LOG_READ` 按**全局记录号**取，段号与段内偏移
+   由设备算术映射，所以环形覆盖后 `LOG_INFO.first_index` 不为 0，从头读要用它。
+
+记录类型（`type` 字段；`a`/`b`/`arg` 的含义随类型变）：
+
+| type | 含义 | a | b | arg |
+| --- | --- | --- | --- | --- |
+| 1 | 上电（BOOT） | 固件主版本 | 固件次版本 | 启动序号 |
+| 2 | 回安全态（SAFE） | 原因：1 本地长按 / 2 上位机急停 / 3 看门狗超时 | 0 | 看门狗窗口 ms（仅原因 3） |
+
+`pwm_permille`/`ipwm_permille` 记的是事件瞬间的设定值，`tick_ms` 是设备运行时间。
+
+> 注意：上位机的**退出约定是默认发一次 `SAFE_STATE`**，所以每跑完一条 CLI 命令都会
+> 在设备上留下一条"上位机急停"的日志记录。只读命令加 `--no-safe` 可以避免。
 
 ---
 
@@ -224,10 +279,10 @@ uv run psu-host-gui --dummy
 ```bash
 cd scripts
 
-# 1) 黄金向量：把 4 条代表性帧的字节序列钉死在单测里
+# 1) 黄金向量：把 9 条代表性帧的字节序列钉死在单测里
 uv run pytest -q -k golden
 
-# 2) C 与 Python 直接 diff（本仓库开发时跑过，6 条向量全部一致）
+# 2) C 与 Python 直接 diff（本仓库开发时跑过，9 条向量全部一致）
 clang -I.. -I../src -o /tmp/codec_vectors.exe tools/codec_vectors.c ../src/lib/proto/psu_proto.c
 /tmp/codec_vectors.exe > /tmp/c.txt
 uv run python tools/gen_codec_vectors.py > /tmp/py.txt
