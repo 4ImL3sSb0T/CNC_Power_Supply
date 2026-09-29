@@ -119,6 +119,12 @@ add_executable(CNC_Power_Supply
 # 改大（如 0x4000）会直接把 scratch 区域链爆。
 target_compile_definitions(CNC_Power_Supply PRIVATE
         PICO_HEAP_SIZE=0x8000
+
+        # littlefs 线程安全：定义在 lfs.c 与 fs.c 两个翻译单元里必须一致。
+        # lfs.c 靠它把 LFS_LOCK/LFS_UNLOCK 从空操作换成调用 lfs_config.lock/unlock
+        # （fs.c 里配的是递归互斥锁）。写在头文件里只能覆盖一个 TU，
+        # 所以只能用 -D 从这儿统一给。不加这个宏 = 没有任何锁，且不会有编译错误。
+        LFS_THREADSAFE
 )
 
 pico_set_program_name(CNC_Power_Supply "CNC_Power_Supply")
@@ -177,6 +183,14 @@ target_link_libraries(CNC_Power_Supply
         hardware_clocks
         hardware_pwm
         hardware_adc
+        # littlefs 的块设备层（src/service/fs/fs.c）：hardware_flash 提供
+        # flash_range_erase/program，pico_flash 提供 flash_safe_execute ——
+        # 后者在本工程走 FreeRTOS SMP 分支（flash.c 里按 LIB_FREERTOS_KERNEL +
+        # FREE_RTOS_KERNEL_SMP 自动选中），会在另一核上建一个高优先级任务关中断，
+        # 不需要 flash_safe_execute_core_init()。因此 **fs_init() 必须等调度器起来后
+        # 在任务里调用**，否则格式化时那个任务永远跑不起来。
+        hardware_flash
+        pico_flash
         hagl
         )
 
