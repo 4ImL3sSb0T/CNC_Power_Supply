@@ -117,7 +117,7 @@ int main()
     xTaskCreate(pcb_test_task, "Test Task", configMINIMAL_STACK_SIZE * 2, NULL, tskIDLE_PRIORITY + 1, &s_test_task);
     xTaskCreate(ui_task, "UI Task", configMINIMAL_STACK_SIZE * 2, display, tskIDLE_PRIORITY + 1, NULL);
     xTaskCreate(key_task, "Key Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, NULL);
-    xTaskCreate(sysmon_task, "SysMon Task", configMINIMAL_STACK_SIZE * 2, NULL, tskIDLE_PRIORITY + 1, NULL);
+    // xTaskCreate(sysmon_task, "SysMon Task", configMINIMAL_STACK_SIZE * 2, NULL, tskIDLE_PRIORITY + 1, NULL);
     xTaskCreate(led_task, "LED Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, NULL);
     /* 文件系统与持久化：只能在调度器起来后挂载（写 Flash 要跨核锁另一核），所以放任务里。
      * 常驻任务，独占所有 Flash 写（配置落盘 + 事件日志），链路任务不受其阻塞。
