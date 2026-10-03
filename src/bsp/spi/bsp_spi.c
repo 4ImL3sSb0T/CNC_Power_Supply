@@ -171,7 +171,7 @@ exit_code_t bsp_spi_set_baudrate(BSP_SPI_DEV dev, u32 baudrate_hz) {
     if (!bsp_spi_valid(dev)) return EXIT_INVALID_PARAM;
     if (!bsp_spi_inited) return EXIT_NOT_INITIALIZED;
 
-    bsp_spi_rt_t* rt = &bsp_spi_cfg[dev];
+    bsp_spi_rt_t *rt = &bsp_spi_rt[dev];
 
     if (xSemaphoreTake(rt->mutex, pdMS_TO_TICKS(BSP_SPI_LOCK_TIMEOUT_MS)) != pdTRUE) return EXIT_BUSY;
 
