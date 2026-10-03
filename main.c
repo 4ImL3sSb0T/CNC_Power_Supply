@@ -4,7 +4,7 @@
 #include "task.h"
 #include "driver/imu/imu.h"
 #include "driver/led/led.h"
-
+#include "driver/lcd/lcd.h"
 // ---------------- CPU 占用率统计 ----------------
 // 基于 FreeRTOS 运行时间统计（FreeRTOSConfig.h 里 configGENERATE_RUN_TIME_STATS）。
 // ulTaskGetRunTimeCounter() 只累计任务“真正在运行”的时间，阻塞等待不计入，
@@ -80,7 +80,10 @@ int main()
 #else
     printf("IMU 读取模式: SDK 阻塞 (i2c_*_blocking)\n");
 #endif
-
+    lcd_init();
+    u16* buffer = lcd_fb();
+    for (u32 index = 0; index < lcd_width() * lcd_height(); index++) buffer[index] = 0xF1A0;
+    lcd_flush();
     xTaskCreate(led_task, "LED Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, NULL);
     xTaskCreate(imu_test_task, "IMU Test Task", configMINIMAL_STACK_SIZE * 2, NULL, tskIDLE_PRIORITY + 1, &s_imu_task);
     xTaskCreate(sysmon_task, "SysMon Task", configMINIMAL_STACK_SIZE * 2, NULL, tskIDLE_PRIORITY + 1, NULL);

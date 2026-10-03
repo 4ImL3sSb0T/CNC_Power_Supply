@@ -95,6 +95,34 @@ target_compile_options(CMSISDSP PRIVATE -ffunction-sections -fdata-sections)
 target_compile_options(CMSISDSP PRIVATE -fno-if-conversion -fno-if-conversion2)
 
 # ====================================================================================
+# HAGL：图形库（src/third_party/hagl）+ 本工程的 HAL 后端
+#
+# 为什么 hagl_hal 必须建在 add_subdirectory(hagl) 之前：
+#   hagl/CMakeLists.txt:61 是 target_link_libraries(hagl INTERFACE hagl_hal)，而
+#   hagl 这个 INTERFACE 库就是同一个文件里刚建出来的，那一行在配置期立刻解析。
+#   hagl_hal 还不存在的话，CMake 会把它当成裸库名去拼 -lhagl_hal，链接期才炸。
+#
+# 为什么要把 src/driver/lcd 塞进 include path：
+#   库用尖括号找后端——hagl.h:57 的 <hagl_hal.h> 和 hagl/color.h:39 的
+#   <hagl_hal_color.h>。这两个文件名是被库写死的，只能让目录配合它，不能反过来。
+#   ${CMAKE_CURRENT_LIST_DIR}/src 这份 PRIVATE include 解决不了：那两个头在
+#   src/driver/lcd/ 下，不在 src/ 下。
+#
+# hagl 是 INTERFACE 库，21 个 .c 直接编进 CNC_Power_Supply，不生成独立静态库；
+# 这里的 include 也是这么传到主 target 的（hagl_hal → hagl → CNC_Power_Supply）。
+#
+# 后端实现 src/driver/lcd/lcd_hal.c 由下面那个 GLOB_RECURSE 自动收进来
+# （src/third_party/ 被排除了，所以 hagl 自己的 .c 不会被重复编译）。
+#
+# 用大字体时要调 HAGL_CHAR_BUFFER_SIZE（hagl.h:66，默认 6*9*2）：
+#   target_compile_definitions(CNC_Power_Supply PRIVATE HAGL_CHAR_BUFFER_SIZE=...)
+# ====================================================================================
+add_library(hagl_hal INTERFACE)
+target_include_directories(hagl_hal INTERFACE ${CMAKE_CURRENT_LIST_DIR}/src/driver/lcd)
+
+add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/src/third_party/hagl)
+
+# ====================================================================================
 # 应用源码：自动扫描 src/ 下的 .c / .cpp，新增源文件后不需要再改这个文件
 #
 # CONFIGURE_DEPENDS：构建时重新比对 glob 结果，目录里增删源文件会自动触发 cmake
@@ -148,6 +176,9 @@ target_link_libraries(CNC_Power_Supply
         FreeRTOS-Kernel
         FreeRTOS-Kernel-Heap4
         CMSISDSP
+        # hagl: INTERFACE 库，源文件和 include 都会传到主 target，
+        # 同时把 hagl_hal（后端头文件所在目录）也一路带过来。
+        hagl
         hardware_adc
         hardware_spi
         hardware_i2c
