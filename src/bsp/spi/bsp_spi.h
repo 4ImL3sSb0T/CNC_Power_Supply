@@ -108,6 +108,22 @@ exit_code_t bsp_spi_cs_release(BSP_SPI_DEV dev);
 exit_code_t bsp_spi_transfer(BSP_SPI_DEV dev, const u8 *tx, u8 *rx,
                              size_t len, u32 timeout_ms);
 
+// ---- 半字传输 ----
+
+// 同上，但一次搬 count 个半字。给每单元 16 位的从机用（RGB565 像素流）。
+//
+// 进去时把 DSS 切成 16、退出后保持 16；下一次 bsp_spi_transfer() 会按需切回 8。
+// 所以两种调用可以在同一个 CS 窗口里交替——命令走 transfer()、像素走
+// transfer16()——driver 不需要自己管数据宽度。
+//
+// 线上字节序由 PL022 在 DSS=16 下按 MSB 先出决定，和调用方缓冲的字节序无关，
+// 因此 u16 帧缓冲按正常的小端顺序存就是对的，driver 不用做任何字节交换。
+//
+// 只写，没有读版本：目前只有像素流需要它。语义（先 cs_assert、超时只约束本段
+// DMA）与 bsp_spi_transfer() 完全一致。
+exit_code_t bsp_spi_transfer16(BSP_SPI_DEV dev, const u16 *tx,
+                               size_t count, u32 timeout_ms);
+
 // ============================ 典型用法 ============================
 //
 // 写一包"命令 + 参数"（ST7789，DC 由 driver 用 bsp_gpio 控制）：
@@ -139,14 +155,25 @@ exit_code_t bsp_spi_transfer(BSP_SPI_DEV dev, const u8 *tx, u8 *rx,
 //
 // 大块像素流：整包一个 CS 窗口，中间标好窗口寄存器就直接推像素缓冲。
 //
+//     bsp_spi_cs_assert(BSP_SPI_DEV_LCD, t);
+//       for (每段窗口寄存器) {
+//           bsp_gpio_set_active(BSP_GPIO_LCD_DC, false);
+//           bsp_spi_transfer(BSP_SPI_DEV_LCD, &cmd, NULL, 1, t);
+//           bsp_gpio_set_active(BSP_GPIO_LCD_DC, true);
+//           bsp_spi_transfer(BSP_SPI_DEV_LCD, params, NULL, n, t);
+//       }
+//       bsp_gpio_set_active(BSP_GPIO_LCD_DC, true);
+//       bsp_spi_transfer16(BSP_SPI_DEV_LCD, fb, pixels, t);   // 半字流
+//     bsp_spi_cs_release(BSP_SPI_DEV_LCD);
+//
 // ============================ 约束与边界 ============================
 //
 // - 不可在中断上下文调用，这些函数会阻塞（等锁、等 DMA）。
 // - 一个事务内可以调多次 transfer，但不能调用其他设备的任何 bsp_spi_* 函数。
 // - 互斥量用 xSemaphoreCreateMutex 创建，非递归：同一个任务在事务中再次
 //   cs_assert 同一个设备会卡到超时后返回 EXIT_BUSY。
-// - 本层不保证 CS 窗口内的字节序、命令语义，也不做字节交换；16bpp 数据的
-//   字节序由 driver 在写缓冲时解决，或后续在 DMA 上用硬件 bswap。
+// - 本层不保证 CS 窗口内的命令语义，也不做字节交换：8 位入口给字节、16 位入口给
+//   半字，各自按上面 bsp_spi_transfer16() 说明的顺序上线，driver 不用自己换序。
 // - DMA 源缓冲在整个 transfer 期间必须有效。同步接口返回时传输已完成，
 //   所以栈上的缓冲是安全的。
 //

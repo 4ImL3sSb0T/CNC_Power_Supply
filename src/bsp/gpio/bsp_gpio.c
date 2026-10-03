@@ -7,7 +7,14 @@ static bsp_gpio_ch_t bsp_gpio_ch[] = {
     [BSP_GPIO_KEY_MAIN] = {},
     [BSP_GPIO_KEY_AUX] = {},
     [BSP_GPIO_KEY_UP] = {},
-    [BSP_GPIO_KEY_DOWN] = {}
+    [BSP_GPIO_KEY_DOWN] = {},
+    // 上电先让 DC 停在数据档、背光熄灭，等面板初始化完再 lcd_on() 点亮。
+    [BSP_GPIO_LCD_DC] = {
+        .dir = BSP_GPIO_DIR_OUT, .gpio = 8, .active_low = false, .init_active = true,
+    },
+    [BSP_GPIO_LCD_BL] = {
+        .dir = BSP_GPIO_DIR_OUT, .gpio = 25, .active_low = true, .init_active = false,
+    }
 };
 
 // attach / detach 在任务上下文写注册表，bsp_gpio_irq_callback 在中断上下文读它。

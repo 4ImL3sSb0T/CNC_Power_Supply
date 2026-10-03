@@ -9,6 +9,10 @@ typedef enum {
     BSP_GPIO_KEY_AUX,
     BSP_GPIO_KEY_UP,
     BSP_GPIO_KEY_DOWN,
+    // LCD 的边带信号。总线（SCK/MOSI/CS）归 bsp_spi，这里只管"这一包是命令还是
+    // 参数"和背光——那是协议语义，bsp_spi 不认。
+    BSP_GPIO_LCD_DC,       // active = 高 = 数据；set_active(false) 即命令
+    BSP_GPIO_LCD_BL,       // active_low：低电平点亮背光
 } BSP_GPIO_CH;
 
 typedef enum { BSP_GPIO_DIR_IN, BSP_GPIO_DIR_OUT } bsp_gpio_dir_t;

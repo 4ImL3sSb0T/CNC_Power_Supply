@@ -49,6 +49,7 @@ typedef struct {
     int tx_ch;                  // 常驻 DMA 通道：热路径上不再做 claim 的全局扫描
     int rx_ch;
     u8  dummy;                  // cfg->dummy_tx 的运行时副本，放 SRAM 里让 TX 通道反复读
+    u8  bits;                   // 当前 DSS（8 / 16），切格式前必须等移位结束
     SemaphoreHandle_t mutex;    // 总线所有权：assert 拿到，release 放掉
     SemaphoreHandle_t done;     // 本段 DMA 完成信号，由 ISR 给出
     volatile bool inited;
@@ -72,6 +73,31 @@ static inline void bsp_spi_cs(const bsp_spi_rt_t *rt, bool assert) {
 // 来抢走别人正在用的 DMA 通道。
 static inline bool bsp_spi_owns(const bsp_spi_rt_t *rt) {
     return xSemaphoreGetMutexHolder(rt->mutex) == xTaskGetCurrentTaskHandle();
+}
+
+// 改 DSS 或抬 CS 之前都要等 BSY 清零。DMA 计数归零只说明字节都进了 FIFO，
+// 最后一个可能还在移位寄存器里：此时抬 CS 会截断它，而 spi_set_format 会先关
+// SSE，带着置位的 BSY 关 SSE 会把 PL022 锁死。
+//
+// 这个等待在物理上有界——最多排空 FIFO 深度（8 帧）的移位时间。反过来说，
+// 时钟停振导致 BSY 永不清零时这里会一直等，和 cs_release 是同一个性质。
+static inline void bsp_spi_wait_shift_done(spi_inst_t *inst) {
+    while (spi_is_busy(inst)) tight_loop_contents();
+}
+
+// 按需切换数据宽度。命令（8 位）和像素（16 位）会在同一个 CS 窗口里交替，
+// 所以缓存当前宽度，只在真的变了时才动寄存器。
+static void bsp_spi_use_bits(bsp_spi_rt_t *rt, u8 bits) {
+    if (rt->bits == bits) return;
+
+    spi_inst_t *inst = rt->cfg->inst;
+    bsp_spi_wait_shift_done(inst);
+
+    spi_set_format(inst, bits,
+                   rt->cfg->cpol ? SPI_CPOL_1 : SPI_CPOL_0,
+                   rt->cfg->cpha ? SPI_CPHA_1 : SPI_CPHA_0,
+                   SPI_MSB_FIRST);
+    rt->bits = bits;
 }
 
 // 每次只开"算完成"的那条通道的中断，ISR 因此不必判断这次是谁完成。
@@ -126,6 +152,7 @@ exit_code_t bsp_spi_init(void) {
         rt->tx_ch = -1;
         rt->rx_ch = -1;
         rt->dummy = cfg->dummy_tx;
+        rt->bits = 8;
 
         rt->mutex = xSemaphoreCreateMutex();
         rt->done = xSemaphoreCreateBinary();
@@ -217,10 +244,8 @@ exit_code_t bsp_spi_cs_release(BSP_SPI_DEV dev) {
     if (!bsp_spi_owns(rt)) return EXIT_FAIL;
 
     // DMA 计数归零只代表字节都进了 FIFO，最后一个字节可能还在移位寄存器里，
-    // 此时抬 CS 会截断它。这个等待有界：最多排空 FIFO 深度（8 字节）的移位时间，
-    // 所以不需要超时参数。超时被 abort 掉的传输也走这里，让 FIFO 自然排空。
-    spi_inst_t *inst = rt->cfg->inst;
-    while (spi_is_busy(inst)) tight_loop_contents();
+    // 此时抬 CS 会截断它。超时被 abort 掉的传输也走这里，让 FIFO 自然排空。
+    bsp_spi_wait_shift_done(rt->cfg->inst);
 
     bsp_spi_cs(rt, false);
     xSemaphoreGive(rt->mutex);
@@ -236,6 +261,8 @@ exit_code_t bsp_spi_transfer(BSP_SPI_DEV dev, const u8 *tx, u8 *rx, size_t len, 
     if (!bsp_spi_owns(rt)) return EXIT_NOT_INITIALIZED;   // 必须先 cs_assert
 
     spi_inst_t *inst = rt->cfg->inst;
+
+    bsp_spi_use_bits(rt, 8);
 
     dma_channel_config tx_cfg = dma_channel_get_default_config(rt->tx_ch);
     channel_config_set_transfer_data_size(&tx_cfg, DMA_SIZE_8);
@@ -278,6 +305,41 @@ exit_code_t bsp_spi_transfer(BSP_SPI_DEV dev, const u8 *tx, u8 *rx, size_t len, 
     }
 
     return timed_out ? EXIT_TIMEOUT: EXIT_OK;
+}
+
+exit_code_t bsp_spi_transfer16(BSP_SPI_DEV dev, const u16 *tx, size_t count, u32 timeout_ms) {
+    if (!bsp_spi_valid(dev)) return EXIT_INVALID_PARAM;
+    if (tx == NULL || count == 0) return EXIT_INVALID_PARAM;
+    if (!bsp_spi_inited) return EXIT_NOT_INITIALIZED;
+
+    bsp_spi_rt_t *rt = &bsp_spi_rt[dev];
+    if (!bsp_spi_owns(rt)) return EXIT_NOT_INITIALIZED;   // 必须先 cs_assert
+
+    spi_inst_t *inst = rt->cfg->inst;
+
+    // 16 位下 PL022 自己按 MSB 先出一个半字，调用方的 u16 缓冲按正常内存顺序给即可。
+    bsp_spi_use_bits(rt, 16);
+
+    dma_channel_config tx_cfg = dma_channel_get_default_config((uint)rt->tx_ch);
+    channel_config_set_transfer_data_size(&tx_cfg, DMA_SIZE_16);
+    channel_config_set_read_increment(&tx_cfg, true);
+    channel_config_set_write_increment(&tx_cfg, false);
+    channel_config_set_dreq(&tx_cfg, spi_get_dreq(inst, true));
+    channel_config_set_high_priority(&tx_cfg, true);
+
+    dma_channel_configure((uint)rt->tx_ch, &tx_cfg, &spi_get_hw(inst)->dr, tx, count, false);
+
+    bsp_spi_irq_select(rt, rt->tx_ch);
+    dma_channel_start((uint)rt->tx_ch);
+
+    const TickType_t ticks = (timeout_ms == BSP_SPI_TIMEOUT_FOREVER) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+    if (xSemaphoreTake(rt->done, ticks) != pdTRUE) {
+        dma_channel_abort((uint)rt->tx_ch);
+        // 不清 done、不碰 CS：收尾同样由调用方走 cs_release。
+        return EXIT_TIMEOUT;
+    }
+
+    return EXIT_OK;
 }
 
 // 一次调用 = 一个完整事务（assert + transfer + release）。给不需要分段
