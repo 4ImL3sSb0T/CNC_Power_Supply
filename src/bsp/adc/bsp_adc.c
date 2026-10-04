@@ -45,9 +45,14 @@ static u16 bsp_adc_read_voltage_stop_dma(BSP_ADC_CH ch) {
         adc_run(false);
         dma_channel_abort(adc_dam_ch);
         adc_fifo_drain();
-        adc_select_input(ch);
+        // 业务枚举不是硬件通道号；单次读取期间关闭轮询。
+        adc_set_round_robin(0);
+        adc_select_input(ch == BSP_ADC_MCU_TEMP ? ADC_TEMPERATURE_CHANNEL_NUM : 2u);
         value = adc_read();
+        // FIFO 仍开启，单次转换结果也会入队；必须丢弃后再恢复双通道 DMA。
+        adc_fifo_drain();
         adc_select_input(0);
+        adc_set_round_robin(0b11);
         dma_channel_configure(adc_dam_ch, &cfg, bsp_adc_buf, &adc_hw->fifo, dma_encode_endless_transfer_count(), true);
         adc_run(true);
         break;
@@ -66,6 +71,7 @@ exit_code_t bsp_adc_init() {
 
     adc_fifo_setup(true, true, 1, false, false);
     adc_set_clkdiv(0);
+    adc_select_input(0);
     adc_set_round_robin(0b11);
 
     adc_dam_ch = dma_claim_unused_channel(true);
@@ -78,6 +84,7 @@ exit_code_t bsp_adc_init() {
 
     dma_channel_configure(adc_dam_ch, &cfg, bsp_adc_buf, &adc_hw->fifo, dma_encode_endless_transfer_count(), true);
     adc_run(true);
+    return EXIT_OK;
 }
 
 u16 bsp_adc_get_raw_value(BSP_ADC_CH ch) {

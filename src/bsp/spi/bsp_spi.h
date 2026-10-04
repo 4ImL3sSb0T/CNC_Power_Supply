@@ -96,7 +96,7 @@ exit_code_t bsp_spi_cs_release(BSP_SPI_DEV dev);
 // 必须在 cs_assert 之后、cs_release 之前调用。没有先 assert 就调，返回
 // EXIT_NOT_INITIALIZED——传输函数自己不拿锁，也不管 CS。
 //
-// timeout_ms 只约束"本段 DMA 完成"，不包含抢总线的时间（锁在 assert 时已经拿到，
+// timeout_ms 覆盖本段 DMA 和尾帧移位完成，不包含抢总线的时间（锁在 assert 时已经拿到，
 // 那一步有自己的超时）。这一点上语义比一体的 write() 更清楚：拿到 EXIT_TIMEOUT
 // 一定是总线时序出了问题，而不是被别的任务挡了一下。
 //
@@ -120,7 +120,7 @@ exit_code_t bsp_spi_transfer(BSP_SPI_DEV dev, const u8 *tx, u8 *rx,
 // 因此 u16 帧缓冲按正常的小端顺序存就是对的，driver 不用做任何字节交换。
 //
 // 只写，没有读版本：目前只有像素流需要它。语义（先 cs_assert、超时只约束本段
-// DMA）与 bsp_spi_transfer() 完全一致。
+// DMA 与尾帧排空）与 bsp_spi_transfer() 完全一致。
 exit_code_t bsp_spi_transfer16(BSP_SPI_DEV dev, const u16 *tx,
                                size_t count, u32 timeout_ms);
 
@@ -168,7 +168,7 @@ exit_code_t bsp_spi_transfer16(BSP_SPI_DEV dev, const u16 *tx,
 //
 // ============================ 约束与边界 ============================
 //
-// - 不可在中断上下文调用，这些函数会阻塞（等锁、等 DMA）。
+// - 传输必须在调度器启动后的任务上下文调用，不可在中断中使用（等锁、等 DMA）。
 // - 一个事务内可以调多次 transfer，但不能调用其他设备的任何 bsp_spi_* 函数。
 // - 互斥量用 xSemaphoreCreateMutex 创建，非递归：同一个任务在事务中再次
 //   cs_assert 同一个设备会卡到超时后返回 EXIT_BUSY。

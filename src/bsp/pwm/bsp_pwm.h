@@ -35,6 +35,8 @@ typedef struct {
     bool  enabled;
 } bsp_pwm_info_t;
 
+// 初始化后在任务中调用运行时 API；同一 slice 的更新和查询共用互斥量。
+// 返回错误时保留原状态；等待 slice 锁超时返回 EXIT_TIMEOUT。
 exit_code_t bsp_pwm_init(void);
 
 /// @brief 设定占空比

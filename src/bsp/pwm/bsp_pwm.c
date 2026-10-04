@@ -58,9 +58,7 @@ typedef struct {
 static bsp_pwm_ch_rt_t bsp_pwm_rt[count_of(bsp_pwm_ch)];
 static bool bsp_pwm_inited = false;
 
-// set_freq 是"关 slice → 改 wrap/clkdiv → 重算 level → 开 slice"的多步操作，
-// 期间被打断会输出异常占空比，所以每个 slice 一把锁。set_duty / enable 只写
-// 单个 level 寄存器，天然原子，不需要拿锁。
+// 同一 slice 的频率、占空比、使能状态和查询共用一把锁，避免双核读改写交错。
 static SemaphoreHandle_t bsp_pwm_slice_mutex[BSP_PWM_SLICE_COUNT];
 
 static bool bsp_pwm_valid(BSP_PWM_CH ch) {
@@ -196,111 +194,113 @@ exit_code_t bsp_pwm_init(void) {
     return EXIT_OK;
 }
 
+// 所有运行时状态访问都必须在对应 slice 的锁内进行。
+static exit_code_t bsp_pwm_lock(const bsp_pwm_ch_rt_t *rt) {
+    if (!bsp_pwm_inited) return EXIT_NOT_INITIALIZED;
+    return xSemaphoreTake(bsp_pwm_slice_mutex[rt->slice],
+                          pdMS_TO_TICKS(BSP_PWM_LOCK_TIMEOUT_MS)) == pdTRUE
+           ? EXIT_OK : EXIT_TIMEOUT;
+}
+
+static void bsp_pwm_unlock(const bsp_pwm_ch_rt_t *rt) {
+    xSemaphoreGive(bsp_pwm_slice_mutex[rt->slice]);
+}
+
 exit_code_t bsp_pwm_set_duty(BSP_PWM_CH ch, float duty) {
     if (!bsp_pwm_valid(ch)) return EXIT_INVALID_PARAM;
-    // 写成 !(a && b) 是为了把 NaN 也一起挡掉
     if (!(duty >= 0.0f && duty <= 1.0f)) return EXIT_INVALID_PARAM;
-
     bsp_pwm_ch_rt_t *rt = &bsp_pwm_rt[ch];
+    exit_code_t rc = bsp_pwm_lock(rt);
+    if (rc != EXIT_OK) return rc;
 
-    // 单寄存器写，天然原子，不用拿 slice 锁
+    rt->duty = duty;
     if (rt->enabled) {
         pwm_set_chan_level(rt->slice, rt->chan, bsp_pwm_duty_to_level(rt, duty));
     }
-    rt->duty = duty;
+    bsp_pwm_unlock(rt);
     return EXIT_OK;
 }
 
 exit_code_t bsp_pwm_get_duty(BSP_PWM_CH ch, float *duty) {
     if (!bsp_pwm_valid(ch) || duty == NULL) return EXIT_INVALID_PARAM;
-    *duty = bsp_pwm_rt[ch].duty;
+    bsp_pwm_ch_rt_t *rt = &bsp_pwm_rt[ch];
+    exit_code_t rc = bsp_pwm_lock(rt);
+    if (rc != EXIT_OK) return rc;
+    *duty = rt->duty;
+    bsp_pwm_unlock(rt);
     return EXIT_OK;
 }
 
-// 换频率。wrap 和 clkdiv 是 slice 共享的，所以这里动的是整个 slice：
-// 同一 slice 上的所有通道都要按各自的 duty 重新算 level。
-static exit_code_t bsp_pwm_apply_freq(bsp_pwm_ch_rt_t *rt, u32 freq_hz) {
+// 先验证频率，再在锁内一次性提交；失败请求不能改变保存的 duty。
+static exit_code_t bsp_pwm_apply_freq(bsp_pwm_ch_rt_t *rt, u32 freq_hz,
+                                      bool set_duty, float duty) {
+    if (!bsp_pwm_inited) return EXIT_NOT_INITIALIZED;
     u16 wrap;
     u8 div_int, div_frac4;
     exit_code_t rc = bsp_pwm_solve(freq_hz, rt->cfg->phase_correct,
                                    &wrap, &div_int, &div_frac4);
     if (rc != EXIT_OK) return rc;
+    rc = bsp_pwm_lock(rt);
+    if (rc != EXIT_OK) return rc;
 
-    // 分频量化后可能落回同一个值，那就没必要扰动 slice
-    if (wrap == rt->wrap &&
-        div_int == rt->clkdiv_int &&
-        div_frac4 == rt->clkdiv_frac4) {
+    if (set_duty) rt->duty = duty;
+    // 相同的量化频率仍然需要提交本次请求中的占空比。
+    if (wrap == rt->wrap && div_int == rt->clkdiv_int && div_frac4 == rt->clkdiv_frac4) {
+        if (set_duty && rt->enabled) {
+            pwm_set_chan_level(rt->slice, rt->chan, bsp_pwm_duty_to_level(rt, rt->duty));
+        }
+        bsp_pwm_unlock(rt);
         return EXIT_OK;
-    }
-
-    SemaphoreHandle_t lock = bsp_pwm_slice_mutex[rt->slice];
-    if (xSemaphoreTake(lock, pdMS_TO_TICKS(BSP_PWM_LOCK_TIMEOUT_MS)) != pdTRUE) {
-        return EXIT_TIMEOUT;
     }
 
     pwm_set_enabled(rt->slice, false);
     pwm_set_clkdiv_int_frac(rt->slice, div_int, div_frac4);
     pwm_set_wrap(rt->slice, wrap);
-
     for (u32 j = 0; j < count_of(bsp_pwm_ch); j++) {
         bsp_pwm_ch_rt_t *peer = &bsp_pwm_rt[j];
         if (peer->slice != rt->slice) continue;
-
         peer->wrap = wrap;
         peer->clkdiv_int = div_int;
         peer->clkdiv_frac4 = div_frac4;
         pwm_set_chan_level(rt->slice, peer->chan,
                            peer->enabled ? bsp_pwm_duty_to_level(peer, peer->duty) : 0);
     }
-
     pwm_set_enabled(rt->slice, true);
-
-    xSemaphoreGive(lock);
+    bsp_pwm_unlock(rt);
     return EXIT_OK;
 }
 
 exit_code_t bsp_pwm_set_freq(BSP_PWM_CH ch, u32 freq_hz) {
     if (!bsp_pwm_valid(ch)) return EXIT_INVALID_PARAM;
-    return bsp_pwm_apply_freq(&bsp_pwm_rt[ch], freq_hz);
+    return bsp_pwm_apply_freq(&bsp_pwm_rt[ch], freq_hz, false, 0.0f);
 }
 
 exit_code_t bsp_pwm_set_freq_duty(BSP_PWM_CH ch, u32 freq_hz, float duty) {
     if (!bsp_pwm_valid(ch)) return EXIT_INVALID_PARAM;
     if (!(duty >= 0.0f && duty <= 1.0f)) return EXIT_INVALID_PARAM;
-
-    bsp_pwm_ch_rt_t *rt = &bsp_pwm_rt[ch];
-    rt->duty = duty;
-
-    exit_code_t rc = bsp_pwm_apply_freq(rt, freq_hz);
-    if (rc != EXIT_OK) return rc;
-
-    // apply_freq 在频率量化后没变时会提前返回，所以这里补一次，保证 duty 生效
-    if (rt->enabled) {
-        pwm_set_chan_level(rt->slice, rt->chan, bsp_pwm_duty_to_level(rt, duty));
-    }
-    return EXIT_OK;
+    return bsp_pwm_apply_freq(&bsp_pwm_rt[ch], freq_hz, true, duty);
 }
 
 exit_code_t bsp_pwm_enable(BSP_PWM_CH ch, bool enable) {
     if (!bsp_pwm_valid(ch)) return EXIT_INVALID_PARAM;
-
     bsp_pwm_ch_rt_t *rt = &bsp_pwm_rt[ch];
+    exit_code_t rc = bsp_pwm_lock(rt);
+    if (rc != EXIT_OK) return rc;
     rt->enabled = enable;
-
-    // 关断用 level = 0 实现，而不是 pwm_set_enabled(slice, false)——后者会把
-    // 同一 slice 上另一路也一起关掉
+    // 只关断该通道，保留同一 slice 上另一路的输出与关断前占空比。
     pwm_set_chan_level(rt->slice, rt->chan,
                        enable ? bsp_pwm_duty_to_level(rt, rt->duty) : 0);
+    bsp_pwm_unlock(rt);
     return EXIT_OK;
 }
 
 exit_code_t bsp_pwm_get_info(BSP_PWM_CH ch, bsp_pwm_info_t *info) {
     if (!bsp_pwm_valid(ch) || info == NULL) return EXIT_INVALID_PARAM;
-
-    const bsp_pwm_ch_rt_t *rt = &bsp_pwm_rt[ch];
+    bsp_pwm_ch_rt_t *rt = &bsp_pwm_rt[ch];
+    exit_code_t rc = bsp_pwm_lock(rt);
+    if (rc != EXIT_OK) return rc;
     const u64 clkdiv4 = (u64)rt->clkdiv_int * BSP_PWM_CLKDIV4_ONE + rt->clkdiv_frac4;
     const u64 cycles = (u64)(rt->wrap + 1u) * (rt->cfg->phase_correct ? 2u : 1u);
-
     info->actual_freq_hz = (u32)((u64)clock_get_hz(clk_sys) * BSP_PWM_CLKDIV4_ONE
                                  / clkdiv4 / cycles);
     info->wrap = rt->wrap;
@@ -308,5 +308,6 @@ exit_code_t bsp_pwm_get_info(BSP_PWM_CH ch, bsp_pwm_info_t *info) {
     info->clkdiv_frac4 = rt->clkdiv_frac4;
     info->duty = rt->duty;
     info->enabled = rt->enabled;
+    bsp_pwm_unlock(rt);
     return EXIT_OK;
 }

@@ -369,7 +369,8 @@ f32 vec2f_angle(vec2f_t v) {
 vec2f_t vec2f_from_angle(f32 angle_rad) {
     vec2f_t result;
 #ifdef USE_CMSIS_DSP
-    arm_sin_cos_f32(angle_rad, &result.y, &result.x);
+    result.y = arm_sin_f32(angle_rad);
+    result.x = arm_cos_f32(angle_rad);
 #else
     result.x = cosf(angle_rad);
     result.y = sinf(angle_rad);
@@ -416,7 +417,8 @@ vec2f_t vec2f_rotate(vec2f_t v, f32 angle_rad) {
     f32 sin_a, cos_a;
 
 #ifdef USE_CMSIS_DSP
-    arm_sin_cos_f32(angle_rad, &sin_a, &cos_a);
+    sin_a = arm_sin_f32(angle_rad);
+    cos_a = arm_cos_f32(angle_rad);
 #else
     sin_a = sinf(angle_rad);
     cos_a = cosf(angle_rad);
@@ -689,7 +691,8 @@ mat2x2_t mat2x2_rotation(f32 angle_rad) {
     f32 sin_a, cos_a;
 
 #ifdef USE_CMSIS_DSP
-    arm_sin_cos_f32(angle_rad, &sin_a, &cos_a);
+    sin_a = arm_sin_f32(angle_rad);
+    cos_a = arm_cos_f32(angle_rad);
 #else
     sin_a = sinf(angle_rad);
     cos_a = cosf(angle_rad);
@@ -754,53 +757,35 @@ lookahead_result_t vec2f_pure_pursuit_lookahead(
     u32 start_index
 ) {
     lookahead_result_t result = {{0, 0}, 0};
-
-    if (path_size < 2) {
+    if (path_points == NULL || path_size == 0 ||
+        !isfinite(lookahead_distance) || lookahead_distance <= 0.0f) {
         return result;
     }
 
-    // 从 start_index 开始搜索，避免重复计算
+    // 以当前位置为圆心求前视圆与线段的交点，优先选同一线段上较靠前的根。
     for (u32 i = start_index; i < path_size - 1; i++) {
-        vec2f_t segment_start = path_points[i];
-        vec2f_t segment_end = path_points[i + 1];
+        const vec2f_t start = path_points[i];
+        const vec2f_t d = vec2f_sub(path_points[i + 1], start);
+        const vec2f_t f = vec2f_sub(start, current_pos);
+        const f32 a = vec2f_dot(d, d);
+        if (a < 1e-8f) continue;  // 重复路径点不构成线段
 
-        // 计算点到线段的最近点
-        vec2f_t closest = vec2f_closest_point_on_segment(current_pos, (line_segment_t){segment_start, segment_end});
-        f32 dist = vec2f_length(vec2f_sub(current_pos, closest));
+        const f32 b = 2.0f * vec2f_dot(f, d);
+        const f32 c = vec2f_dot(f, f) - lookahead_distance * lookahead_distance;
+        const f32 discriminant = b * b - 4.0f * a * c;
+        if (discriminant < 0.0f) continue;
 
-        if (dist >= lookahead_distance) {
-            // 找到满足条件的线段
-            vec2f_t line_vec = vec2f_sub(segment_end, segment_start);
-            f32 line_len = vec2f_length(line_vec);
-
-            if (line_len < 1e-8f) {
-                result.point = segment_start;
-                result.index = i;
-                return result;
-            }
-
-            // 解二次方程找到 lookahead 点
-            vec2f_t to_current = vec2f_sub(current_pos, segment_start);
-            f32 t = vec2f_dot(to_current, line_vec) / (line_len * line_len);
-
-            // 计算 lookahead 点到最近点的距离
-            f32 dist_to_closest = lookahead_distance - dist;
-
-            // 沿线段方向移动
-            f32 offset = dist_to_closest / line_len;
-            f32 t_lookahead = t + offset;
-
-            // 钳制到线段
-            if (t_lookahead < 0.0f) t_lookahead = 0.0f;
-            if (t_lookahead > 1.0f) t_lookahead = 1.0f;
-
-            result.point = vec2f_add(segment_start, vec2f_scale(line_vec, t_lookahead));
+        const f32 root = sqrtf(discriminant);
+        f32 t = (-b + root) / (2.0f * a);
+        if (t < 0.0f || t > 1.0f) t = (-b - root) / (2.0f * a);
+        if (t >= 0.0f && t <= 1.0f) {
+            result.point = vec2f_add(start, vec2f_scale(d, t));
             result.index = i;
             return result;
         }
     }
 
-    // 未找到合适的点，返回路径终点
+    // 剩余路径没有交点时回落到终点，也覆盖只有一个路径点的情况。
     result.point = path_points[path_size - 1];
     result.index = path_size - 1;
     return result;

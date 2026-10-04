@@ -43,7 +43,7 @@ typedef struct
     uint8_t databytes;      /* bit7 = 发送后延时；0xFF = 结束 */
 } lcd_init_cmd_t;
 
-/* lcd_init 允许在调度器启动前调用，那时 vTaskDelay 不可用。 */
+/* 任务运行时让出 CPU；调度器未运行时仅提供非 RTOS 延时。 */
 static void lcd_delay_ms(uint32_t ms)
 {
     if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING)

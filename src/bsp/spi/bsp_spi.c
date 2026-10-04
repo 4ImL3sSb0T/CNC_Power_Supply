@@ -14,6 +14,7 @@
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
+#include "pico/time.h"
 
 #include "FreeRTOS.h"
 #include "semphr.h"
@@ -32,11 +33,11 @@
 
 static const bsp_spi_dev_cfg_t bsp_spi_cfg[] = {
     [BSP_SPI_DEV_LCD] = {
-        .inst = spi0,
-        // GPIO16~19 同一组 SPI0 功能引脚；CS 走 SIO 软件控制，
-        // 不能改成 GPIO_FUNC_SPI，否则会切到硬件 CSn 上（见文件头说明）。
-        .pin_sck = 18, .pin_mosi = 19, .pin_miso = 16,
-        .pin_cs = 17,
+        .inst = spi1,
+        // 保留 IMU 的 GPIO16/17 与风扇 PWM 的 GPIO18，LCD 使用 SPI1。
+        // CS 仍由 SIO 软件控制；写入型面板不占用 MISO。实际接线见 docs/hardware.md。
+        .pin_sck = 10, .pin_mosi = 11, .pin_miso = BSP_SPI_PIN_NONE,
+        .pin_cs = 9,
         .cs_active_low = true,
         .baudrate_hz = 40u * 1000u * 1000u,
         .cpol = 0, .cpha = 0,
@@ -50,6 +51,7 @@ typedef struct {
     int rx_ch;
     u8  dummy;                  // cfg->dummy_tx 的运行时副本，放 SRAM 里让 TX 通道反复读
     u8  bits;                   // 当前 DSS（8 / 16），切格式前必须等移位结束
+    u32 baudrate_hz;             // 复位恢复时保留当前实际波特率
     SemaphoreHandle_t mutex;    // 总线所有权：assert 拿到，release 放掉
     SemaphoreHandle_t done;     // 本段 DMA 完成信号，由 ISR 给出
     volatile bool inited;
@@ -75,34 +77,64 @@ static inline bool bsp_spi_owns(const bsp_spi_rt_t *rt) {
     return xSemaphoreGetMutexHolder(rt->mutex) == xTaskGetCurrentTaskHandle();
 }
 
-// 改 DSS 或抬 CS 之前都要等 BSY 清零。DMA 计数归零只说明字节都进了 FIFO，
-// 最后一个可能还在移位寄存器里：此时抬 CS 会截断它，而 spi_set_format 会先关
-// SSE，带着置位的 BSY 关 SSE 会把 PL022 锁死。
-//
-// 这个等待在物理上有界——最多排空 FIFO 深度（8 帧）的移位时间。反过来说，
-// 时钟停振导致 BSY 永不清零时这里会一直等，和 cs_release 是同一个性质。
-static inline void bsp_spi_wait_shift_done(spi_inst_t *inst) {
-    while (spi_is_busy(inst)) tight_loop_contents();
+// DMA 完成仅代表数据入 FIFO，必须等 BSY 清零后才能改 DC、数据宽度或 CS。
+static bool bsp_spi_wait_shift_done(spi_inst_t *inst, u64 deadline_us, bool forever) {
+    while (spi_is_busy(inst)) {
+        if (!forever && time_us_64() >= deadline_us) return false;
+        tight_loop_contents();
+    }
+    return true;
 }
 
-// 按需切换数据宽度。命令（8 位）和像素（16 位）会在同一个 CS 窗口里交替，
-// 所以缓存当前宽度，只在真的变了时才动寄存器。
-static void bsp_spi_use_bits(bsp_spi_rt_t *rt, u8 bits) {
-    if (rt->bits == bits) return;
-
-    spi_inst_t *inst = rt->cfg->inst;
-    bsp_spi_wait_shift_done(inst);
-
-    spi_set_format(inst, bits,
+// 超时后停止 DMA 并复位 SPI，丢弃未发送的帧和完成信号，允许后续事务重新开始。
+static void bsp_spi_abort_and_reset(bsp_spi_rt_t *rt) {
+    // 与另一核上的 ISR 串行清理，避免超时之后旧 ISR 才补发完成信号。
+    taskENTER_CRITICAL();
+    dma_irqn_set_channel_enabled(0, (uint)rt->tx_ch, false);
+    dma_irqn_set_channel_enabled(0, (uint)rt->rx_ch, false);
+    dma_channel_abort((uint)rt->tx_ch);
+    dma_channel_abort((uint)rt->rx_ch);
+    dma_irqn_acknowledge_channel(0, (uint)rt->tx_ch);
+    dma_irqn_acknowledge_channel(0, (uint)rt->rx_ch);
+    (void)xSemaphoreTake(rt->done, 0);
+    taskEXIT_CRITICAL();
+    spi_deinit(rt->cfg->inst);
+    spi_init(rt->cfg->inst, rt->baudrate_hz);
+    spi_set_format(rt->cfg->inst, 8,
                    rt->cfg->cpol ? SPI_CPOL_1 : SPI_CPOL_0,
-                   rt->cfg->cpha ? SPI_CPHA_1 : SPI_CPHA_0,
-                   SPI_MSB_FIRST);
+                   rt->cfg->cpha ? SPI_CPHA_1 : SPI_CPHA_0, SPI_MSB_FIRST);
+    rt->bits = 8;
+}
+
+static bool bsp_spi_use_bits(bsp_spi_rt_t *rt, u8 bits, u64 deadline_us, bool forever) {
+    if (rt->bits == bits) return true;
+    if (!bsp_spi_wait_shift_done(rt->cfg->inst, deadline_us, forever)) return false;
+    spi_set_format(rt->cfg->inst, bits,
+                   rt->cfg->cpol ? SPI_CPOL_1 : SPI_CPOL_0,
+                   rt->cfg->cpha ? SPI_CPHA_1 : SPI_CPHA_0, SPI_MSB_FIRST);
     rt->bits = bits;
+    return true;
+}
+
+// DMA 等待和尾帧排空共用同一截止时间，不给每个阶段重新计时。
+static exit_code_t bsp_spi_wait_segment(bsp_spi_rt_t *rt, u64 deadline_us, bool forever) {
+    TickType_t ticks = portMAX_DELAY;
+    if (!forever) {
+        const u64 now_us = time_us_64();
+        const u64 remaining_us = deadline_us > now_us ? deadline_us - now_us : 0;
+        ticks = pdMS_TO_TICKS((remaining_us + 999u) / 1000u);
+    }
+    if (xSemaphoreTake(rt->done, ticks) == pdTRUE &&
+        bsp_spi_wait_shift_done(rt->cfg->inst, deadline_us, forever)) {
+        return EXIT_OK;
+    }
+    bsp_spi_abort_and_reset(rt);
+    return EXIT_TIMEOUT;
 }
 
 // 每次只开"算完成"的那条通道的中断，ISR 因此不必判断这次是谁完成。
 //
-// 但两条通道的状态位都要先清掉：INTS 是原始状态位，和 INTE 使能位无关。
+// 但两条通道的原始完成位（INTR）都要先清掉，INTE 只控制是否触发中断。
 // 上一次全双工传输里被关掉中断的 TX 通道，完成时照样会把 INTS 置上而没人应答；
 // 等到下一次只写传输打开 TX 中断时，这个陈旧的置位会立刻触发一次中断，让
 // 等待中的任务以为传输已经完成——接着抬 CS、截断整帧。
@@ -118,6 +150,8 @@ static void bsp_spi_irq_select(bsp_spi_rt_t *rt, int done_ch) {
 }
 
 static void bsp_spi_dma_irq_handler(void) {
+    const UBaseType_t saved = taskENTER_CRITICAL_FROM_ISR();
+    BaseType_t woken = pdFALSE;
     for (u32 i = 0; i < count_of(bsp_spi_rt); ++i) {
         bsp_spi_rt_t *rt = &bsp_spi_rt[i];
         if (!rt->inited) continue;
@@ -135,10 +169,10 @@ static void bsp_spi_dma_irq_handler(void) {
         // 会被随后的应答一起清掉，那次完成就没有中断了。
         dma_irqn_acknowledge_channel(0, (uint)fired);
 
-        BaseType_t woken = pdFALSE;
         xSemaphoreGiveFromISR(rt->done, &woken);
-        portYIELD_FROM_ISR(woken);
     }
+    taskEXIT_CRITICAL_FROM_ISR(saved);
+    portYIELD_FROM_ISR(woken);
 }
 
 exit_code_t bsp_spi_init(void) {
@@ -169,7 +203,7 @@ exit_code_t bsp_spi_init(void) {
             return EXIT_NO_RESOURCE;
         }
 
-        spi_init(cfg->inst, cfg->baudrate_hz);
+        rt->baudrate_hz = spi_init(cfg->inst, cfg->baudrate_hz);
         spi_set_format(cfg->inst, 8, cfg->cpol ? SPI_CPOL_1 : SPI_CPOL_0, cfg->cpha ? SPI_CPHA_1 : SPI_CPHA_0, SPI_MSB_FIRST);
 
         gpio_set_function(cfg->pin_sck, GPIO_FUNC_SPI);
@@ -202,7 +236,7 @@ exit_code_t bsp_spi_set_baudrate(BSP_SPI_DEV dev, u32 baudrate_hz) {
 
     if (xSemaphoreTake(rt->mutex, pdMS_TO_TICKS(BSP_SPI_LOCK_TIMEOUT_MS)) != pdTRUE) return EXIT_BUSY;
 
-    spi_set_baudrate(rt->cfg->inst, baudrate_hz);
+    rt->baudrate_hz = spi_set_baudrate(rt->cfg->inst, baudrate_hz);
 
     xSemaphoreGive(rt->mutex);
     return EXIT_OK;
@@ -210,7 +244,7 @@ exit_code_t bsp_spi_set_baudrate(BSP_SPI_DEV dev, u32 baudrate_hz) {
 
 exit_code_t bsp_spi_cs_assert(BSP_SPI_DEV dev, u32 timeout_ms) {
     if (!bsp_spi_valid(dev)) return EXIT_INVALID_PARAM;
-    if (!bsp_spi_inited) return EXIT_NOT_INITIALIZED;
+    if (!bsp_spi_inited || xTaskGetSchedulerState() != taskSCHEDULER_RUNNING) return EXIT_NOT_INITIALIZED;
 
     bsp_spi_rt_t *rt = &bsp_spi_rt[dev];
     spi_inst_t *inst = rt->cfg->inst;
@@ -243,13 +277,13 @@ exit_code_t bsp_spi_cs_release(BSP_SPI_DEV dev) {
     // 同时也覆盖了"assert 没拿到锁就失败"的那种失败路径。
     if (!bsp_spi_owns(rt)) return EXIT_FAIL;
 
-    // DMA 计数归零只代表字节都进了 FIFO，最后一个字节可能还在移位寄存器里，
-    // 此时抬 CS 会截断它。超时被 abort 掉的传输也走这里，让 FIFO 自然排空。
-    bsp_spi_wait_shift_done(rt->cfg->inst);
-
+    // 正常 transfer 已等到移位结束；异常情况下收尾也必须有界并归还互斥量。
+    const u64 deadline_us = time_us_64() + (u64)BSP_SPI_LOCK_TIMEOUT_MS * 1000u;
+    const bool finished = bsp_spi_wait_shift_done(rt->cfg->inst, deadline_us, false);
+    if (!finished) bsp_spi_abort_and_reset(rt);
     bsp_spi_cs(rt, false);
     xSemaphoreGive(rt->mutex);
-    return EXIT_OK;
+    return finished ? EXIT_OK : EXIT_TIMEOUT;
 }
 
 exit_code_t bsp_spi_transfer(BSP_SPI_DEV dev, const u8 *tx, u8 *rx, size_t len, u32 timeout_ms) {
@@ -262,7 +296,15 @@ exit_code_t bsp_spi_transfer(BSP_SPI_DEV dev, const u8 *tx, u8 *rx, size_t len, 
 
     spi_inst_t *inst = rt->cfg->inst;
 
-    bsp_spi_use_bits(rt, 8);
+    const bool forever = timeout_ms == BSP_SPI_TIMEOUT_FOREVER;
+    const u64 deadline_us = forever ? 0 : time_us_64() + (u64)timeout_ms * 1000u;
+    if (!bsp_spi_use_bits(rt, 8, deadline_us, forever)) {
+        bsp_spi_abort_and_reset(rt);
+        return EXIT_TIMEOUT;
+    }
+    // 同一 CS 窗口内前面的只写段也会留下 RX 数据，避免后续读段收到旧帧。
+    while (spi_is_readable(inst)) (void)spi_get_hw(inst)->dr;
+    spi_get_hw(inst)->icr = SPI_SSPICR_RORIC_BITS;
 
     dma_channel_config tx_cfg = dma_channel_get_default_config(rt->tx_ch);
     channel_config_set_transfer_data_size(&tx_cfg, DMA_SIZE_8);
@@ -296,15 +338,7 @@ exit_code_t bsp_spi_transfer(BSP_SPI_DEV dev, const u8 *tx, u8 *rx, size_t len, 
         dma_channel_start((uint)rt->tx_ch);
     }
 
-    const TickType_t ticks = (timeout_ms == BSP_SPI_TIMEOUT_FOREVER) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
-    const bool timed_out = (xSemaphoreTake(rt->done, ticks) != pdTRUE);
-
-    if (timed_out) {
-        dma_channel_abort(rt->tx_ch);
-        if (rx != NULL) dma_channel_abort((uint)rt->rx_ch);
-    }
-
-    return timed_out ? EXIT_TIMEOUT: EXIT_OK;
+    return bsp_spi_wait_segment(rt, deadline_us, forever);
 }
 
 exit_code_t bsp_spi_transfer16(BSP_SPI_DEV dev, const u16 *tx, size_t count, u32 timeout_ms) {
@@ -318,7 +352,12 @@ exit_code_t bsp_spi_transfer16(BSP_SPI_DEV dev, const u16 *tx, size_t count, u32
     spi_inst_t *inst = rt->cfg->inst;
 
     // 16 位下 PL022 自己按 MSB 先出一个半字，调用方的 u16 缓冲按正常内存顺序给即可。
-    bsp_spi_use_bits(rt, 16);
+    const bool forever = timeout_ms == BSP_SPI_TIMEOUT_FOREVER;
+    const u64 deadline_us = forever ? 0 : time_us_64() + (u64)timeout_ms * 1000u;
+    if (!bsp_spi_use_bits(rt, 16, deadline_us, forever)) {
+        bsp_spi_abort_and_reset(rt);
+        return EXIT_TIMEOUT;
+    }
 
     dma_channel_config tx_cfg = dma_channel_get_default_config((uint)rt->tx_ch);
     channel_config_set_transfer_data_size(&tx_cfg, DMA_SIZE_16);
@@ -332,14 +371,7 @@ exit_code_t bsp_spi_transfer16(BSP_SPI_DEV dev, const u16 *tx, size_t count, u32
     bsp_spi_irq_select(rt, rt->tx_ch);
     dma_channel_start((uint)rt->tx_ch);
 
-    const TickType_t ticks = (timeout_ms == BSP_SPI_TIMEOUT_FOREVER) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
-    if (xSemaphoreTake(rt->done, ticks) != pdTRUE) {
-        dma_channel_abort((uint)rt->tx_ch);
-        // 不清 done、不碰 CS：收尾同样由调用方走 cs_release。
-        return EXIT_TIMEOUT;
-    }
-
-    return EXIT_OK;
+    return bsp_spi_wait_segment(rt, deadline_us, forever);
 }
 
 // 一次调用 = 一个完整事务（assert + transfer + release）。给不需要分段

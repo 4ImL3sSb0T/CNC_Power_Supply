@@ -174,38 +174,37 @@ static void lcd_hal_scale_blit(void *self, uint16_t x0, uint16_t y0, uint16_t w,
     uint32_t x_ratio;
     uint32_t y_ratio;
 
-    /* 和 blit 不同：hagl_blit.c:83-88 不裁剪就直接转发过来（软件回落那条路内部走
-       hagl_put_pixel 才安全），所以这里必须自己夹，否则会写到帧缓冲外面。 */
-    if ((w == 0) || (h == 0) || (x0 >= fb_w) || (y0 >= fb_h))
+    /* 上游直接转发缩放绘制，后端负责屏幕边界与用户 clip 的交集。 */
+    if (w == 0 || h == 0 || b->width <= 0 || b->height <= 0 || fb == NULL ||
+        src == NULL || src->buffer == NULL || src->width == 0 || src->height == 0)
     {
         return;
     }
-    if (((uint32_t)x0 + w) > fb_w)
-    {
-        w = (uint16_t)(fb_w - x0);
-    }
-    if (((uint32_t)y0 + h) > fb_h)
-    {
-        h = (uint16_t)(fb_h - y0);
-    }
+    uint32_t left = x0 > b->clip.x0 ? x0 : b->clip.x0;
+    uint32_t top = y0 > b->clip.y0 ? y0 : b->clip.y0;
+    uint32_t right = (uint32_t)x0 + w;
+    uint32_t bottom = (uint32_t)y0 + h;
+    if (right > fb_w) right = fb_w;
+    if (right > (uint32_t)b->clip.x1 + 1u) right = (uint32_t)b->clip.x1 + 1u;
+    if (bottom > fb_h) bottom = fb_h;
+    if (bottom > (uint32_t)b->clip.y1 + 1u) bottom = (uint32_t)b->clip.y1 + 1u;
+    if (left >= right || top >= bottom) return;
 
-    /* 16.16 定点的最近邻，和 hagl_blit.c:92-93 的软件回落算法一致。
-       乘积上界是 src->width/height << 16，240 级别不到 2^24，不会溢出 32 位。 */
+    /* 缩放比例始终使用原始目标尺寸；裁剪只改变写入范围和源坐标偏移。 */
     x_ratio = ((uint32_t)src->width << 16) / w;
     y_ratio = ((uint32_t)src->height << 16) / h;
-
-    for (uint16_t y = 0; y < h; y++)
+    for (uint32_t y = top; y < bottom; y++)
     {
-        const uint8_t *srow = src->buffer + (uint32_t)((y * y_ratio) >> 16) * src->pitch;
-        hagl_color_t *drow = fb + (uint32_t)(y0 + y) * fb_w + x0;
-
-        for (uint16_t x = 0; x < w; x++)
+        const uint32_t sy = ((y - y0) * y_ratio) >> 16;
+        const hagl_color_t *srow = (const hagl_color_t *)(src->buffer + sy * src->pitch);
+        hagl_color_t *drow = fb + y * fb_w;
+        for (uint32_t x = left; x < right; x++)
         {
-            drow[x] = ((const hagl_color_t *)srow)[(x * x_ratio) >> 16];
+            drow[x] = srow[((x - x0) * x_ratio) >> 16];
         }
     }
-
-    lcd_hal_mark(x0, y0, (uint16_t)(x0 + w - 1), (uint16_t)(y0 + h - 1));
+    lcd_hal_mark((uint16_t)left, (uint16_t)top,
+                 (uint16_t)(right - 1u), (uint16_t)(bottom - 1u));
 }
 
 /* ========================== 呈现与收尾 ========================== */

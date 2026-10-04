@@ -70,6 +70,20 @@ void imu_test_task(void *pvParameters) {
     }
 }
 
+// LCD 的 SPI DMA 等待依赖调度器，初始化和首次刷新必须在任务中完成。
+static void lcd_test_task(void *pvParameters) {
+    (void)pvParameters;
+    exit_code_t rc = lcd_init();
+    if (rc == EXIT_OK) {
+        u16 *buffer = lcd_fb();
+        const u32 pixels = (u32)lcd_width() * lcd_height();
+        for (u32 index = 0; index < pixels; index++) buffer[index] = 0xF1A0;
+        rc = lcd_flush();
+    }
+    if (rc != EXIT_OK) printf("LCD 初始化/刷新失败: %s\n", error_code_name(rc));
+    vTaskDelete(NULL);
+}
+
 int main()
 {
     stdio_init_all();
@@ -80,13 +94,12 @@ int main()
 #else
     printf("IMU 读取模式: SDK 阻塞 (i2c_*_blocking)\n");
 #endif
-    lcd_init();
-    u16* buffer = lcd_fb();
-    for (u32 index = 0; index < lcd_width() * lcd_height(); index++) buffer[index] = 0xF1A0;
-    lcd_flush();
+
     xTaskCreate(led_task, "LED Task", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, NULL);
     xTaskCreate(imu_test_task, "IMU Test Task", configMINIMAL_STACK_SIZE * 2, NULL, tskIDLE_PRIORITY + 1, &s_imu_task);
     xTaskCreate(sysmon_task, "SysMon Task", configMINIMAL_STACK_SIZE * 2, NULL, tskIDLE_PRIORITY + 1, NULL);
+
+    xTaskCreate(lcd_test_task, "LCD Task", configMINIMAL_STACK_SIZE * 2, NULL, tskIDLE_PRIORITY + 1, NULL);
 
     printf("Starting FreeRTOS scheduler...\n");
     vTaskStartScheduler();
